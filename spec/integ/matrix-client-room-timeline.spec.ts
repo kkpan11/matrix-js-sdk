@@ -14,20 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import HttpBackend from "matrix-mock-request";
-
+import type HttpBackend from "matrix-mock-request";
 import * as utils from "../test-utils/test-utils";
 import { EventStatus } from "../../src/models/event";
 import {
     MatrixError,
     ClientEvent,
-    IEvent,
-    MatrixClient,
+    type IEvent,
+    type MatrixClient,
     RoomEvent,
-    ISyncResponse,
-    IMinimalEvent,
-    IRoomEvent,
-    Room,
+    type ISyncResponse,
+    type IMinimalEvent,
+    type IRoomEvent,
+    type Room,
 } from "../../src";
 import { TestClient } from "../TestClient";
 import { KnownMembership } from "../../src/@types/membership";
@@ -133,16 +132,16 @@ describe("MatrixClient room timelines", function () {
         const client = testClient.client;
 
         setNextSyncData();
-        httpBackend!.when("GET", "/versions").respond(200, {});
-        httpBackend!.when("GET", "/pushrules").respond(200, {});
-        httpBackend!.when("POST", "/filter").respond(200, { filter_id: "fid" });
-        httpBackend!.when("GET", "/sync").respond(200, SYNC_DATA);
-        httpBackend!.when("GET", "/sync").respond(200, function () {
+        httpBackend.when("GET", "/versions").respond(200, {});
+        httpBackend.when("GET", "/pushrules").respond(200, {});
+        httpBackend.when("POST", "/filter").respond(200, { filter_id: "fid" });
+        httpBackend.when("GET", "/sync").respond(200, SYNC_DATA);
+        httpBackend.when("GET", "/sync").respond(200, function () {
             return NEXT_SYNC_DATA;
         });
-        client!.startClient();
+        client.startClient();
 
-        return [client!, httpBackend];
+        return [client, httpBackend];
     };
 
     beforeEach(async function () {
@@ -635,9 +634,7 @@ describe("MatrixClient room timelines", function () {
             utils.mkMessage({ user: userId, room: roomId }),
         ];
 
-        const contextUrl =
-            `/rooms/${encodeURIComponent(roomId)}/context/` +
-            `${encodeURIComponent(initialSyncEventData[2].event_id!)}`;
+        const contextUrl = `/rooms/${encodeURIComponent(roomId)}/context/${encodeURIComponent(initialSyncEventData[2].event_id!)}`;
         const contextResponse = {
             start: "start_token",
             events_before: [initialSyncEventData[1], initialSyncEventData[0]],
@@ -721,7 +718,7 @@ describe("MatrixClient room timelines", function () {
                     } else {
                         reject(new Error("TestError: Timed out while waiting for `RoomEvent.TimelineReset` to fire."));
                     }
-                }, 4000 /* FIXME: Is there a way to reference the current timeout of this test in Jest? */);
+                }, 4000 /* FIXME: Is there a way to reference the current timeout of this test in Vitest? */);
 
                 room.on(RoomEvent.TimelineReset, async () => {
                     try {

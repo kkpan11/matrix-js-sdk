@@ -1,20 +1,19 @@
 // This file had a function whose name is all caps, which displeases eslint
 /* eslint new-cap: "off" */
 
-import { defer, IDeferred } from "../../src/utils";
 import { MatrixError } from "../../src/http-api";
 import { MatrixScheduler } from "../../src/scheduler";
 import * as utils from "../test-utils/test-utils";
-import { MatrixEvent } from "../../src";
+import { type MatrixEvent } from "../../src";
 import { KnownMembership } from "../../src/@types/membership";
 
-jest.useFakeTimers();
+vi.useFakeTimers();
 
 describe("MatrixScheduler", function () {
     let scheduler: MatrixScheduler<Record<string, boolean>>;
     let retryFn: ((event: MatrixEvent | null, attempt: number, err: MatrixError) => number) | null;
     let queueFn: ((event: MatrixEvent) => string | null) | null;
-    let deferred: IDeferred<Record<string, boolean>>;
+    let deferred: PromiseWithResolvers<Record<string, boolean>>;
     const roomId = "!foo:bar";
     const eventA = utils.mkMessage({
         user: "@alice:bar",
@@ -44,7 +43,7 @@ describe("MatrixScheduler", function () {
         );
         retryFn = null;
         queueFn = null;
-        deferred = defer();
+        deferred = Promise.withResolvers();
     });
 
     it("should process events in a queue in a FIFO manner", async function () {
@@ -54,17 +53,15 @@ describe("MatrixScheduler", function () {
         queueFn = function () {
             return "one_big_queue";
         };
-        const deferA = defer<Record<string, boolean>>();
-        const deferB = defer<Record<string, boolean>>();
+        const deferA = Promise.withResolvers<Record<string, boolean>>();
+        const deferB = Promise.withResolvers<Record<string, boolean>>();
         let yieldedA = false;
         scheduler.setProcessFunction(function (event) {
             if (yieldedA) {
-                // eslint-disable-next-line jest/no-conditional-expect
                 expect(event).toEqual(eventB);
                 return deferB.promise;
             } else {
                 yieldedA = true;
-                // eslint-disable-next-line jest/no-conditional-expect
                 expect(event).toEqual(eventA);
                 return deferA.promise;
             }
@@ -79,9 +76,9 @@ describe("MatrixScheduler", function () {
 
     it("should invoke the retryFn on failure and wait the amount of time specified", async function () {
         const waitTimeMs = 1500;
-        const retryDefer = defer();
+        const retryResolvers = Promise.withResolvers<void>();
         retryFn = function () {
-            retryDefer.resolve();
+            retryResolvers.resolve();
             return waitTimeMs;
         };
         queueFn = function () {
@@ -92,7 +89,6 @@ describe("MatrixScheduler", function () {
         scheduler.setProcessFunction(function (ev) {
             procCount += 1;
             if (procCount === 1) {
-                // eslint-disable-next-line jest/no-conditional-expect
                 expect(ev).toEqual(eventA);
                 return deferred.promise;
             } else if (procCount === 2) {
@@ -109,9 +105,9 @@ describe("MatrixScheduler", function () {
         await Promise.resolve();
         expect(procCount).toEqual(1);
         deferred.reject({});
-        await retryDefer.promise;
+        await retryResolvers.promise;
         expect(procCount).toEqual(1);
-        jest.advanceTimersByTime(waitTimeMs);
+        vi.advanceTimersByTime(waitTimeMs);
         await Promise.resolve();
         expect(procCount).toEqual(2);
     });
@@ -127,17 +123,15 @@ describe("MatrixScheduler", function () {
             return "yep";
         };
 
-        const deferA = defer<Record<string, boolean>>();
-        const deferB = defer<Record<string, boolean>>();
+        const deferA = Promise.withResolvers<Record<string, boolean>>();
+        const deferB = Promise.withResolvers<Record<string, boolean>>();
         let procCount = 0;
         scheduler.setProcessFunction(function (ev) {
             procCount += 1;
             if (procCount === 1) {
-                // eslint-disable-next-line jest/no-conditional-expect
                 expect(ev).toEqual(eventA);
                 return deferA.promise;
             } else if (procCount === 2) {
-                // eslint-disable-next-line jest/no-conditional-expect
                 expect(ev).toEqual(eventB);
                 return deferB.promise;
             }
@@ -180,7 +174,7 @@ describe("MatrixScheduler", function () {
         };
 
         const expectOrder = [eventA.getId(), eventB.getId(), eventD.getId()];
-        const deferA = defer<Record<string, boolean>>();
+        const deferA = Promise.withResolvers<Record<string, boolean>>();
         const allExpectedEventsSeenInOrderPromise = new Promise((resolve) => {
             scheduler.setProcessFunction(function (event) {
                 const id = expectOrder.shift();
@@ -200,7 +194,7 @@ describe("MatrixScheduler", function () {
         setTimeout(function () {
             deferA.resolve({});
         }, 1000);
-        jest.advanceTimersByTime(1000);
+        vi.advanceTimersByTime(1000);
         await allExpectedEventsSeenInOrderPromise;
     });
 

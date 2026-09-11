@@ -14,9 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { QrCodeData, QrCodeMode } from "@matrix-org/matrix-sdk-crypto-wasm";
-import { mocked } from "jest-mock";
-import fetchMock from "fetch-mock-jest";
+import { QrCodeData, QrCodeIntent } from "@matrix-org/matrix-sdk-crypto-wasm";
+import fetchMock from "@fetch-mock/vitest";
 
 import {
     MSC4108FailureReason,
@@ -26,22 +25,21 @@ import {
     PayloadType,
     RendezvousError,
 } from "../../../src/rendezvous";
-import { defer } from "../../../src/utils";
 import {
     ClientPrefix,
-    DEVICE_CODE_SCOPE,
-    IHttpOpts,
-    IMyDevice,
-    MatrixClient,
+    OAuthGrantType,
+    type IHttpOpts,
+    type IMyDevice,
+    type MatrixClient,
     MatrixError,
     MatrixHttpApi,
 } from "../../../src";
-import { mockOpenIdConfiguration } from "../../test-utils/oidc";
+import { makeDelegatedAuthMetadata } from "../../test-utils/auth";
 
 function makeMockClient(opts: { userId: string; deviceId: string; msc4108Enabled: boolean }): MatrixClient {
     const baseUrl = "https://example.com";
     const crypto = {
-        exportSecretsForQrLogin: jest.fn(),
+        exportSecretsForQrLogin: vi.fn(),
     };
     const client = {
         doesServerSupportUnstableFeature(feature: string) {
@@ -55,9 +53,11 @@ function makeMockClient(opts: { userId: string; deviceId: string; msc4108Enabled
         },
         baseUrl,
         getDomain: () => "example.com",
-        getDevice: jest.fn(),
-        getCrypto: jest.fn(() => crypto),
-        getAuthIssuer: jest.fn().mockResolvedValue({ issuer: "https://issuer/" }),
+        getDevice: vi.fn(),
+        getCrypto: vi.fn(() => crypto),
+        getAuthMetadata: vi
+            .fn()
+            .mockResolvedValue(makeDelegatedAuthMetadata("https://issuer/", [OAuthGrantType.DeviceAuthorization])),
     } as unknown as MatrixClient;
     client.http = new MatrixHttpApi<IHttpOpts & { onlyData: true }>(client, {
         baseUrl: client.baseUrl,
@@ -68,28 +68,12 @@ function makeMockClient(opts: { userId: string; deviceId: string; msc4108Enabled
 }
 
 describe("MSC4108SignInWithQR", () => {
-    beforeEach(() => {
-        fetchMock.get(
-            "https://issuer/.well-known/openid-configuration",
-            mockOpenIdConfiguration("https://issuer/", [DEVICE_CODE_SCOPE]),
-        );
-        fetchMock.get("https://issuer/jwks", {
-            status: 200,
-            headers: {
-                "Content-Type": "application/json",
-            },
-            keys: [],
-        });
-    });
-
-    afterEach(() => {
-        fetchMock.reset();
-    });
-
     const url = "https://fallbackserver/rz/123";
     const deviceId = "DEADB33F";
     const verificationUri = "https://example.com/verify";
     const verificationUriComplete = "https://example.com/verify/complete";
+    const metadata = makeDelegatedAuthMetadata();
+    const clientId = "client-id";
 
     it("should generate qr code data as expected", async () => {
         const session = new MSC4108RendezvousSession({
@@ -116,17 +100,17 @@ describe("MSC4108SignInWithQR", () => {
         let opponentLogin: MSC4108SignInWithQR;
 
         beforeEach(async () => {
-            let ourData = defer<string>();
-            let opponentData = defer<string>();
+            let ourData = Promise.withResolvers<string>();
+            let opponentData = Promise.withResolvers<string>();
 
             const ourMockSession = {
-                send: jest.fn(async (newData) => {
+                send: vi.fn(async (newData) => {
                     ourData.resolve(newData);
                 }),
-                receive: jest.fn(() => {
+                receive: vi.fn(() => {
                     const prom = opponentData.promise;
                     prom.then(() => {
-                        opponentData = defer();
+                        opponentData = Promise.withResolvers();
                     });
                     return prom;
                 }),
@@ -139,13 +123,13 @@ describe("MSC4108SignInWithQR", () => {
                 },
             } as unknown as MSC4108RendezvousSession;
             const opponentMockSession = {
-                send: jest.fn(async (newData) => {
+                send: vi.fn(async (newData) => {
                     opponentData.resolve(newData);
                 }),
-                receive: jest.fn(() => {
+                receive: vi.fn(() => {
                     const prom = ourData.promise;
                     prom.then(() => {
-                        ourData = defer();
+                        ourData = Promise.withResolvers();
                     });
                     return prom;
                 }),
@@ -156,7 +140,7 @@ describe("MSC4108SignInWithQR", () => {
 
             const ourChannel = new MSC4108SecureChannel(ourMockSession);
             const qrCodeData = QrCodeData.fromBytes(
-                await ourChannel.generateCode(QrCodeMode.Reciprocate, client.getDomain()!),
+                await ourChannel.generateCode(QrCodeIntent.Reciprocate, client.getDomain()!),
             );
             const opponentChannel = new MSC4108SecureChannel(opponentMockSession, qrCodeData.publicKey);
 
@@ -174,45 +158,38 @@ describe("MSC4108SignInWithQR", () => {
         });
 
         it("should be able to connect with opponent and share verificationUri", async () => {
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUriComplete,
+            });
             await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
 
-            mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
+            vi.mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
 
             await Promise.all([
                 expect(ourLogin.deviceAuthorizationGrant()).resolves.toEqual({
                     verificationUri: verificationUriComplete,
                 }),
-                // We don't have the new device side of this flow implemented at this time so mock it
-                // @ts-ignore
-                opponentLogin.send({
-                    type: PayloadType.Protocol,
-                    protocol: "device_authorization_grant",
-                    device_authorization_grant: {
-                        verification_uri: verificationUri,
-                        verification_uri_complete: verificationUriComplete,
-                    },
-                    device_id: deviceId,
-                }),
+                opponentLogin.deviceAuthorizationGrant({ clientId, deviceId, metadata }),
             ]);
         });
 
         it("should abort if device already exists", async () => {
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUriComplete,
+            });
             await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
 
-            mocked(client.getDevice).mockResolvedValue({} as IMyDevice);
+            vi.mocked(client.getDevice).mockResolvedValue({} as IMyDevice);
 
             await Promise.all([
                 expect(ourLogin.deviceAuthorizationGrant()).rejects.toThrow("Specified device ID already exists"),
-                // We don't have the new device side of this flow implemented at this time so mock it
-                // @ts-ignore
-                opponentLogin.send({
-                    type: PayloadType.Protocol,
-                    protocol: "device_authorization_grant",
-                    device_authorization_grant: {
-                        verification_uri: verificationUri,
-                    },
-                    device_id: deviceId,
-                }),
+                opponentLogin.deviceAuthorizationGrant({ clientId, deviceId, metadata }),
             ]);
         });
 
@@ -223,7 +200,6 @@ describe("MSC4108SignInWithQR", () => {
                 expect(ourLogin.deviceAuthorizationGrant()).rejects.toThrow(
                     "Received a request for an unsupported protocol",
                 ),
-                // We don't have the new device side of this flow implemented at this time so mock it
                 // @ts-ignore
                 opponentLogin.send({
                     type: PayloadType.Protocol,
@@ -239,40 +215,52 @@ describe("MSC4108SignInWithQR", () => {
         it("should be able to connect with opponent and share secrets", async () => {
             await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
 
-            // We don't have the new device side of this flow implemented at this time so mock it
-            // @ts-ignore
-            ourLogin.expectingNewDeviceId = "DEADB33F";
+            vi.mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUriComplete,
+            });
 
-            const ourProm = ourLogin.shareSecrets();
-
-            // Consume the ProtocolAccepted message which would normally be handled by step 4 which we do not have here
-            // @ts-ignore
-            await opponentLogin.receive();
-
-            mocked(client.getDevice).mockResolvedValue({} as IMyDevice);
+            await Promise.all([
+                ourLogin.deviceAuthorizationGrant(),
+                opponentLogin.deviceAuthorizationGrant({
+                    clientId,
+                    deviceId,
+                    metadata,
+                }),
+            ]);
 
             const secrets = {
                 cross_signing: { master_key: "mk", user_signing_key: "usk", self_signing_key: "ssk" },
             };
-            client.getCrypto()!.exportSecretsBundle = jest.fn().mockResolvedValue(secrets);
+            client.getCrypto()!.exportSecretsBundle = vi.fn().mockResolvedValue(secrets);
+
+            // simulate IdP issuing a token from the device_code flow
+            fetchMock.postOnce(metadata.token_endpoint, { access_token: "test", token_type: "Bearer" });
+            vi.mocked(client.getDevice).mockResolvedValue({} as IMyDevice);
+
+            const ourProm = ourLogin.shareSecrets();
+            const opponentProm = opponentLogin
+                .completeLoginOnNewDevice({ clientId })
+                .then(() => opponentLogin.shareSecrets());
 
             const payload = {
                 secrets: expect.objectContaining(secrets),
             };
-            await Promise.all([
-                expect(ourProm).resolves.toEqual(payload),
-                expect(opponentLogin.shareSecrets()).resolves.toEqual(payload),
-            ]);
-        });
+            await expect(ourProm).resolves.toEqual(payload);
+            await expect(opponentProm).resolves.toEqual(payload);
+        }, 20000);
 
         it("should abort if device doesn't come up by timeout", async () => {
-            jest.spyOn(globalThis, "setTimeout").mockImplementation((fn) => {
+            vi.spyOn(globalThis, "setTimeout").mockImplementation((fn) => {
                 fn();
                 // TODO: mock timers properly
                 return -1 as any;
             });
-            jest.spyOn(Date, "now").mockImplementation(() => {
-                return 12345678 + mocked(setTimeout).mock.calls.length * 1000;
+            vi.spyOn(Date, "now").mockImplementation(() => {
+                return 12345678 + vi.mocked(setTimeout).mock.calls.length * 1000;
             });
 
             await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
@@ -285,7 +273,7 @@ describe("MSC4108SignInWithQR", () => {
             await opponentLogin.send({
                 type: PayloadType.Success,
             });
-            mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
+            vi.mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
 
             const ourProm = ourLogin.shareSecrets();
             await expect(ourProm).rejects.toThrow("New device not found");
@@ -302,7 +290,7 @@ describe("MSC4108SignInWithQR", () => {
             await opponentLogin.send({
                 type: PayloadType.Success,
             });
-            mocked(client.getDevice).mockRejectedValue(
+            vi.mocked(client.getDevice).mockRejectedValue(
                 new MatrixError({ errcode: "M_UNKNOWN", error: "The message" }, 500),
             );
 
@@ -319,7 +307,7 @@ describe("MSC4108SignInWithQR", () => {
         });
 
         it("should not send secrets if user cancels", async () => {
-            jest.spyOn(globalThis, "setTimeout").mockImplementation((fn) => {
+            vi.spyOn(globalThis, "setTimeout").mockImplementation((fn) => {
                 fn();
                 // TODO: mock timers properly
                 return -1 as any;
@@ -334,25 +322,155 @@ describe("MSC4108SignInWithQR", () => {
             const ourProm = ourLogin.shareSecrets();
             const opponentProm = opponentLogin.shareSecrets();
 
-            // Consume the ProtocolAccepted message which would normally be handled by step 4 which we do not have here
-            // @ts-ignore
-            await opponentLogin.receive();
-
-            const deferred = defer<IMyDevice>();
-            mocked(client.getDevice).mockReturnValue(deferred.promise);
+            const deviceResolvers = Promise.withResolvers<IMyDevice>();
+            vi.mocked(client.getDevice).mockReturnValue(deviceResolvers.promise);
 
             ourLogin.cancel(MSC4108FailureReason.UserCancelled).catch(() => {});
-            deferred.resolve({} as IMyDevice);
+            deviceResolvers.resolve({} as IMyDevice);
 
             const secrets = {
                 cross_signing: { master_key: "mk", user_signing_key: "usk", self_signing_key: "ssk" },
             };
-            client.getCrypto()!.exportSecretsBundle = jest.fn().mockResolvedValue(secrets);
+            client.getCrypto()!.exportSecretsBundle = vi.fn().mockResolvedValue(secrets);
 
             await Promise.all([
                 expect(ourProm).rejects.toThrow("User cancelled"),
                 expect(opponentProm).rejects.toThrow("Unexpected message received"),
             ]);
+        });
+    });
+
+    describe("should be able to connect as a login device", () => {
+        let client: MatrixClient;
+        let ourLogin: MSC4108SignInWithQR;
+        let opponentLogin: MSC4108SignInWithQR;
+
+        beforeEach(async () => {
+            let ourData = Promise.withResolvers<string>();
+            let opponentData = Promise.withResolvers<string>();
+
+            const ourMockSession = {
+                send: vi.fn(async (newData) => {
+                    ourData.resolve(newData);
+                }),
+                receive: vi.fn(() => {
+                    const prom = opponentData.promise;
+                    prom.then(() => {
+                        opponentData = Promise.withResolvers();
+                    });
+                    return prom;
+                }),
+                url,
+                cancelled: false,
+                cancel: () => {
+                    // @ts-ignore
+                    ourMockSession.cancelled = true;
+                    ourData.resolve("");
+                },
+            } as unknown as MSC4108RendezvousSession;
+            const opponentMockSession = {
+                send: vi.fn(async (newData) => {
+                    opponentData.resolve(newData);
+                }),
+                receive: vi.fn(() => {
+                    const prom = ourData.promise;
+                    prom.then(() => {
+                        ourData = Promise.withResolvers();
+                    });
+                    return prom;
+                }),
+                url,
+            } as unknown as MSC4108RendezvousSession;
+
+            client = makeMockClient({ userId: "@alice:example.com", deviceId: "alice", msc4108Enabled: true });
+
+            const ourChannel = new MSC4108SecureChannel(ourMockSession);
+            const qrCodeData = QrCodeData.fromBytes(await ourChannel.generateCode(QrCodeIntent.Login));
+            const opponentChannel = new MSC4108SecureChannel(opponentMockSession, qrCodeData.publicKey);
+
+            ourLogin = new MSC4108SignInWithQR(ourChannel, true);
+            opponentLogin = new MSC4108SignInWithQR(opponentChannel, false, client);
+        });
+
+        it("should be able to connect with opponent and share check code", async () => {
+            expect(ourLogin.checkCode).toBe(opponentLogin.checkCode);
+        });
+
+        it("should be able to connect with opponent and share verificationUri", async () => {
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUriComplete,
+            });
+            await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
+
+            vi.mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
+
+            await Promise.all([
+                expect(ourLogin.deviceAuthorizationGrant({ metadata, clientId, deviceId })).resolves.toEqual({
+                    userCode: "uc",
+                    verificationUri: verificationUriComplete,
+                }),
+                expect(opponentLogin.deviceAuthorizationGrant({ clientId, deviceId, metadata })).resolves.toEqual({
+                    verificationUri: verificationUriComplete,
+                }),
+            ]);
+        });
+
+        it("should abort if device already exists", async () => {
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUri,
+            });
+            await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
+
+            vi.mocked(client.getDevice).mockResolvedValue({} as IMyDevice);
+
+            await Promise.all([
+                ourLogin.deviceAuthorizationGrant({ metadata, clientId, deviceId }),
+                expect(opponentLogin.deviceAuthorizationGrant()).rejects.toThrow("Specified device ID already exists"),
+            ]);
+        });
+
+        it("should abort on declined login", async () => {
+            await Promise.all([ourLogin.negotiateProtocols(), opponentLogin.negotiateProtocols()]);
+
+            vi.mocked(client.getDevice).mockRejectedValue(new MatrixError({ errcode: "M_NOT_FOUND" }, 404));
+            fetchMock.post(metadata.device_authorization_endpoint!, {
+                device_code: "test",
+                user_code: "uc",
+                expires_in: 9999,
+                verification_uri: verificationUriComplete,
+            });
+
+            await Promise.all([
+                ourLogin.deviceAuthorizationGrant({
+                    clientId,
+                    deviceId,
+                    metadata,
+                }),
+                opponentLogin.deviceAuthorizationGrant(),
+            ]);
+
+            const secrets = {
+                cross_signing: { master_key: "mk", user_signing_key: "usk", self_signing_key: "ssk" },
+            };
+            client.getCrypto()!.exportSecretsBundle = vi.fn().mockResolvedValue(secrets);
+
+            fetchMock.postOnce(metadata.token_endpoint, { error: "access_denied" });
+
+            const ourProm = ourLogin.completeLoginOnNewDevice({ clientId });
+            const opponentProm = opponentLogin.shareSecrets();
+
+            await expect(ourProm).rejects.toThrow(
+                new RendezvousError("Rejection from device authorization endpoint", MSC4108FailureReason.UserCancelled),
+            );
+            await expect(opponentProm).rejects.toThrow(
+                new RendezvousError("Failed", MSC4108FailureReason.UserCancelled),
+            );
         });
     });
 });

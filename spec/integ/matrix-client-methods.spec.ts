@@ -13,28 +13,25 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-import HttpBackend from "matrix-mock-request";
-import { Mocked } from "jest-mock";
 
+import type HttpBackend from "matrix-mock-request";
 import * as utils from "../test-utils/test-utils";
-import { CRYPTO_ENABLED, IStoredClientOpts, MatrixClient } from "../../src/client";
+import { type IStoredClientOpts, MatrixClient } from "../../src/client";
 import { MatrixEvent } from "../../src/models/event";
 import {
     Filter,
     JoinRule,
-    KnockRoomOpts,
+    type KnockRoomOpts,
     MemoryStore,
     Method,
     Room,
-    RoomSummary,
+    type RoomSummary,
     SERVICE_TYPES,
 } from "../../src/matrix";
 import { TestClient } from "../TestClient";
 import { THREAD_RELATION_TYPE } from "../../src/models/thread";
-import { IFilterDefinition } from "../../src/filter";
-import { ISearchResults } from "../../src/@types/search";
-import { IStore } from "../../src/store";
-import { CryptoBackend } from "../../src/common-crypto/CryptoBackend";
+import { type IFilterDefinition } from "../../src/filter";
+import { type ISearchResults } from "../../src/@types/search";
 import { SetPresence } from "../../src/sync";
 import { KnownMembership } from "../../src/@types/membership";
 
@@ -54,7 +51,7 @@ describe("MatrixClient", function () {
         const store = new MemoryStore();
 
         const testClient = new TestClient(userId, "aliceDevice", accessToken, undefined, {
-            store: store as IStore,
+            store: store,
             identityServer: {
                 getAccessToken: () => Promise.resolve(identityAccessToken),
             },
@@ -159,6 +156,30 @@ describe("MatrixClient", function () {
         });
     });
 
+    describe("mediaConfig", function () {
+        it("should get media config on unauthenticated media call", async () => {
+            httpBackend.when("GET", "/_matrix/media/v3/config").respond(200, '{"m.upload.size": 50000000}', true);
+
+            const prom = client.getMediaConfig();
+
+            httpBackend.flushAllExpected();
+
+            expect((await prom)["m.upload.size"]).toEqual(50000000);
+        });
+
+        it("should get media config on authenticated media call", async () => {
+            httpBackend
+                .when("GET", "/_matrix/client/v1/media/config")
+                .respond(200, '{"m.upload.size": 50000000}', true);
+
+            const prom = client.getMediaConfig(true);
+
+            httpBackend.flushAllExpected();
+
+            expect((await prom)["m.upload.size"]).toEqual(50000000);
+        });
+    });
+
     describe("joinRoom", function () {
         it("should no-op given the ID of a room you've already joined", async () => {
             const roomId = "!foo:bar";
@@ -245,6 +266,59 @@ describe("MatrixClient", function () {
         });
     });
 
+    describe("invite", function () {
+        it("should send request to /invite", async () => {
+            const roomId = "!roomId:server";
+            const userId = "@user:server";
+
+            httpBackend
+                .when("POST", `/rooms/${encodeURIComponent(roomId)}/invite`)
+                .check((request) => {
+                    expect(request.data).toEqual({ user_id: userId });
+                })
+                .respond(200, {});
+
+            const prom = client.invite(roomId, userId);
+            await httpBackend.flushAllExpected();
+            await prom;
+            httpBackend.verifyNoOutstandingExpectation();
+        });
+
+        it("accepts a stringy reason argument", async () => {
+            const roomId = "!roomId:server";
+            const userId = "@user:server";
+
+            httpBackend
+                .when("POST", `/rooms/${encodeURIComponent(roomId)}/invite`)
+                .check((request) => {
+                    expect(request.data).toEqual({ user_id: userId, reason: "testreason" });
+                })
+                .respond(200, {});
+
+            const prom = client.invite(roomId, userId, "testreason");
+            await httpBackend.flushAllExpected();
+            await prom;
+            httpBackend.verifyNoOutstandingExpectation();
+        });
+
+        it("accepts an options object with a reason", async () => {
+            const roomId = "!roomId:server";
+            const userId = "@user:server";
+
+            httpBackend
+                .when("POST", `/rooms/${encodeURIComponent(roomId)}/invite`)
+                .check((request) => {
+                    expect(request.data).toEqual({ user_id: userId, reason: "testreason" });
+                })
+                .respond(200, {});
+
+            const prom = client.invite(roomId, userId, { reason: "testreason" });
+            await httpBackend.flushAllExpected();
+            await prom;
+            httpBackend.verifyNoOutstandingExpectation();
+        });
+    });
+
     describe("knockRoom", function () {
         const roomId = "!some-room-id:example.org";
         const reason = "some reason";
@@ -272,6 +346,7 @@ describe("MatrixClient", function () {
             expect((await prom).room_id).toBe(roomId);
         });
 
+        // eslint-disable-next-line @vitest/expect-expect
         it("should no-op if you've already knocked a room", function () {
             const room = new Room(roomId, client, userId);
 
@@ -305,23 +380,16 @@ describe("MatrixClient", function () {
                 [
                     403,
                     { errcode: "M_FORBIDDEN", error: "You don't have permission to knock" },
-                    "[M_FORBIDDEN: MatrixError: [403] You don't have permission to knock]",
+                    "MatrixError: [403] You don't have permission to knock",
                 ],
-                [
-                    500,
-                    { errcode: "INTERNAL_SERVER_ERROR" },
-                    "[INTERNAL_SERVER_ERROR: MatrixError: [500] Unknown message]",
-                ],
+                [500, { errcode: "INTERNAL_SERVER_ERROR" }, "MatrixError: [500] Unknown message"],
             ];
 
             it.each(testCases)("should handle %s error", async (code, { errcode, error }, snapshot) => {
                 httpBackend.when("POST", "/knock/" + encodeURIComponent(roomId)).respond(code, { errcode, error });
 
                 const prom = client.knockRoom(roomId);
-                await Promise.all([
-                    httpBackend.flushAllExpected(),
-                    expect(prom).rejects.toMatchInlineSnapshot(snapshot),
-                ]);
+                await Promise.all([httpBackend.flushAllExpected(), expect(prom).rejects.toThrow(snapshot)]);
             });
         });
     });
@@ -641,126 +709,6 @@ describe("MatrixClient", function () {
                     data.results[0].context.getTimeline().find((e) => e.getId() === "$flibble:localhost"),
                 ).toBeTruthy();
             });
-        });
-    });
-
-    describe("downloadKeys", function () {
-        if (!CRYPTO_ENABLED) {
-            return;
-        }
-
-        beforeEach(function () {
-            // running initLegacyCrypto should trigger a key upload
-            httpBackend.when("POST", "/keys/upload").respond(200, {});
-            return Promise.all([client.initLegacyCrypto(), httpBackend.flush("/keys/upload", 1)]);
-        });
-
-        afterEach(() => {
-            client.stopClient();
-        });
-
-        it("should do an HTTP request and then store the keys", function () {
-            const ed25519key = "7wG2lzAqbjcyEkOP7O4gU7ItYcn+chKzh5sT/5r2l78";
-            // ed25519key = client.getDeviceEd25519Key();
-            const borisKeys = {
-                dev1: {
-                    algorithms: ["1"],
-                    device_id: "dev1",
-                    keys: { "ed25519:dev1": ed25519key },
-                    signatures: {
-                        boris: {
-                            "ed25519:dev1":
-                                "RAhmbNDq1efK3hCpBzZDsKoGSsrHUxb25NW5/WbEV9R" +
-                                "JVwLdP032mg5QsKt/pBDUGtggBcnk43n3nBWlA88WAw",
-                        },
-                    },
-                    unsigned: { abc: "def" },
-                    user_id: "boris",
-                },
-            };
-            const chazKeys = {
-                dev2: {
-                    algorithms: ["2"],
-                    device_id: "dev2",
-                    keys: { "ed25519:dev2": ed25519key },
-                    signatures: {
-                        chaz: {
-                            "ed25519:dev2":
-                                "FwslH/Q7EYSb7swDJbNB5PSzcbEO1xRRBF1riuijqvL" +
-                                "EkrK9/XVN8jl4h7thGuRITQ01siBQnNmMK9t45QfcCQ",
-                        },
-                    },
-                    unsigned: { ghi: "def" },
-                    user_id: "chaz",
-                },
-            };
-
-            /*
-            function sign(o) {
-                var anotherjson = require('another-json');
-                var b = JSON.parse(JSON.stringify(o));
-                delete(b.signatures);
-                delete(b.unsigned);
-                return client.crypto.olmDevice.sign(anotherjson.stringify(b));
-            };
-
-            logger.log("Ed25519: " + ed25519key);
-            logger.log("boris:", sign(borisKeys.dev1));
-            logger.log("chaz:", sign(chazKeys.dev2));
-            */
-
-            httpBackend
-                .when("POST", "/keys/query")
-                .check(function (req) {
-                    expect(req.data).toEqual({
-                        device_keys: {
-                            boris: [],
-                            chaz: [],
-                        },
-                    });
-                })
-                .respond(200, {
-                    device_keys: {
-                        boris: borisKeys,
-                        chaz: chazKeys,
-                    },
-                });
-
-            const prom = client.downloadKeys(["boris", "chaz"]).then(function (res) {
-                assertObjectContains(res.get("boris")!.get("dev1")!, {
-                    verified: 0, // DeviceVerification.UNVERIFIED
-                    keys: { "ed25519:dev1": ed25519key },
-                    algorithms: ["1"],
-                    unsigned: { abc: "def" },
-                });
-
-                assertObjectContains(res.get("chaz")!.get("dev2")!, {
-                    verified: 0, // DeviceVerification.UNVERIFIED
-                    keys: { "ed25519:dev2": ed25519key },
-                    algorithms: ["2"],
-                    unsigned: { ghi: "def" },
-                });
-            });
-
-            httpBackend.flush("");
-            return prom;
-        });
-    });
-
-    describe("deleteDevice", function () {
-        const auth = { identifier: 1 };
-        it("should pass through an auth dict", function () {
-            httpBackend
-                .when("DELETE", "/_matrix/client/v3/devices/my_device")
-                .check(function (req) {
-                    expect(req.data).toEqual({ auth: auth });
-                })
-                .respond(200);
-
-            const prom = client.deleteDevice("my_device", auth);
-
-            httpBackend.flush("");
-            return prom;
         });
     });
 
@@ -1243,7 +1191,7 @@ describe("MatrixClient", function () {
     describe("logout", () => {
         it("should abort pending requests when called with stopClient=true", async () => {
             httpBackend.when("POST", "/logout").respond(200, {});
-            const fn = jest.fn();
+            const fn = vi.fn();
             client.http.request(Method.Get, "/test").catch(fn);
             client.logout(true);
             await httpBackend.flush(undefined);
@@ -1371,7 +1319,7 @@ describe("MatrixClient", function () {
         });
 
         afterEach(() => {
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         it("should always fetch capabilities and then cache", async () => {
@@ -1442,6 +1390,7 @@ describe("MatrixClient", function () {
     });
 
     describe("publicRooms", () => {
+        // eslint-disable-next-line @vitest/expect-expect
         it("should use GET request if no server or filter is specified", () => {
             httpBackend.when("GET", "/publicRooms").respond(200, {});
             client.publicRooms({});
@@ -1628,52 +1577,9 @@ describe("MatrixClient", function () {
         });
     });
 
-    describe("uploadKeys", () => {
-        // uploadKeys() is a no-op nowadays, so there's not much to test here.
-        it("should complete successfully", async () => {
-            await client.uploadKeys();
-        });
-    });
-
-    describe("getCryptoTrustCrossSignedDevices", () => {
-        it("should throw if e2e is disabled", () => {
-            expect(() => client.getCryptoTrustCrossSignedDevices()).toThrow("End-to-end encryption disabled");
-        });
-
-        it("should proxy to the crypto backend", async () => {
-            const mockBackend = {
-                getTrustCrossSignedDevices: jest.fn().mockReturnValue(true),
-            } as unknown as Mocked<CryptoBackend>;
-            client["cryptoBackend"] = mockBackend;
-
-            expect(client.getCryptoTrustCrossSignedDevices()).toBe(true);
-            mockBackend.getTrustCrossSignedDevices.mockReturnValue(false);
-            expect(client.getCryptoTrustCrossSignedDevices()).toBe(false);
-        });
-    });
-
-    describe("setCryptoTrustCrossSignedDevices", () => {
-        it("should throw if e2e is disabled", () => {
-            expect(() => client.setCryptoTrustCrossSignedDevices(false)).toThrow("End-to-end encryption disabled");
-        });
-
-        it("should proxy to the crypto backend", async () => {
-            const mockBackend = {
-                setTrustCrossSignedDevices: jest.fn(),
-            } as unknown as Mocked<CryptoBackend>;
-            client["cryptoBackend"] = mockBackend;
-
-            client.setCryptoTrustCrossSignedDevices(true);
-            expect(mockBackend.setTrustCrossSignedDevices).toHaveBeenLastCalledWith(true);
-
-            client.setCryptoTrustCrossSignedDevices(false);
-            expect(mockBackend.setTrustCrossSignedDevices).toHaveBeenLastCalledWith(false);
-        });
-    });
-
     describe("setSyncPresence", () => {
         it("should pass calls through to the underlying sync api", () => {
-            const setPresence = jest.fn();
+            const setPresence = vi.fn();
             // @ts-ignore
             client.syncApi = { setPresence };
             client.setSyncPresence(SetPresence.Unavailable);
@@ -1682,6 +1588,7 @@ describe("MatrixClient", function () {
     });
 
     describe("sendTyping", () => {
+        // eslint-disable-next-line @vitest/expect-expect
         it("should bail early for guests", async () => {
             client.setGuest(true);
             await client.sendTyping("!room:server", true, 100);
@@ -1935,6 +1842,28 @@ describe("MatrixClient", function () {
 
         it("should return the localpart of the userId", () => {
             expect(client.getUserIdLocalpart()).toBe("alice");
+        });
+    });
+
+    describe("setRoomMutePushRule", () => {
+        // eslint-disable-next-line @vitest/expect-expect
+        it("should set room push rule to muted", async () => {
+            const roomId = "!roomId:server";
+            const client = new MatrixClient({
+                baseUrl: "http://localhost",
+                fetchFn: httpBackend.fetchFn as typeof globalThis.fetch,
+            });
+            client.pushRules = {
+                global: {
+                    room: [{ rule_id: roomId, actions: [], default: false, enabled: false }],
+                },
+            };
+
+            const path = `/pushrules/global/room/${encodeURIComponent(roomId)}`;
+            httpBackend.when("DELETE", path).respond(200, {});
+            httpBackend.when("PUT", path).respond(200, {});
+            client.setRoomMutePushRule("global", roomId, true);
+            await httpBackend.flush("");
         });
     });
 });
@@ -2197,11 +2126,3 @@ const buildEventCreate = () =>
         type: "m.room.create",
         unsigned: { age: 80126105 },
     });
-
-function assertObjectContains(obj: Record<string, any>, expected: any): void {
-    for (const k in expected) {
-        if (expected.hasOwnProperty(k)) {
-            expect(obj[k]).toEqual(expected[k]);
-        }
-    }
-}

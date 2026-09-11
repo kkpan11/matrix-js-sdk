@@ -16,9 +16,7 @@ limitations under the License.
 
 import "fake-indexeddb/auto";
 
-import { LocalIndexedDBStoreBackend } from "../../../src/store/indexeddb-local-backend";
 import { IndexedDBStoreWorker } from "../../../src/store/indexeddb-store-worker";
-import { defer } from "../../../src/utils";
 
 function setupWorker(worker: IndexedDBStoreWorker): void {
     worker.onMessage({ data: { command: "setupWorker", args: [] } } as any);
@@ -27,19 +25,19 @@ function setupWorker(worker: IndexedDBStoreWorker): void {
 
 describe("IndexedDBStore Worker", () => {
     it("should pass 'closed' event via postMessage", async () => {
-        const deferred = defer<void>();
-        const postMessage = jest.fn().mockImplementation(({ seq, command }) => {
+        const postMessageSuccessResolvers = Promise.withResolvers<void>();
+        const postMessage = vi.fn().mockImplementation(({ seq, command }) => {
             if (seq === 1 && command === "cmd_success") {
-                deferred.resolve();
+                postMessageSuccessResolvers.resolve();
             }
         });
         const worker = new IndexedDBStoreWorker(postMessage);
         setupWorker(worker);
 
-        await deferred.promise;
+        await postMessageSuccessResolvers.promise;
 
         // @ts-ignore - private field access
-        (worker.backend as LocalIndexedDBStoreBackend).db!.onclose!({} as Event);
+        worker.backend!.db!.onclose!({} as Event);
         expect(postMessage).toHaveBeenCalledWith({
             command: "closed",
         });

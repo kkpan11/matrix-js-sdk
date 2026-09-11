@@ -18,19 +18,19 @@ limitations under the License.
  * This is an internal module. See {@link MemoryStore} for the public class.
  */
 
-import { EventType } from "../@types/event.ts";
-import { Room } from "../models/room.ts";
-import { User } from "../models/user.ts";
-import { IEvent, MatrixEvent } from "../models/event.ts";
-import { RoomState, RoomStateEvent } from "../models/room-state.ts";
-import { RoomMember } from "../models/room-member.ts";
-import { Filter } from "../filter.ts";
-import { ISavedSync, IStore, UserCreator } from "./index.ts";
-import { RoomSummary } from "../models/room-summary.ts";
-import { ISyncResponse } from "../sync-accumulator.ts";
-import { IStateEventWithRoomId } from "../@types/search.ts";
-import { IndexedToDeviceBatch, ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
-import { IStoredClientOpts } from "../client.ts";
+import { type EventType } from "../@types/event.ts";
+import { type Room } from "../models/room.ts";
+import { type SyncUserProfile, type User } from "../models/user.ts";
+import { type IEvent, type MatrixEvent } from "../models/event.ts";
+import { type RoomState, RoomStateEvent } from "../models/room-state.ts";
+import { type RoomMember } from "../models/room-member.ts";
+import { type Filter } from "../filter.ts";
+import { type ISavedSync, type IStore, type UserCreator } from "./index.ts";
+import { type RoomSummary } from "../models/room-summary.ts";
+import { type ISyncResponse } from "../sync-accumulator.ts";
+import { type IStateEventWithRoomId } from "../@types/search.ts";
+import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
+import { type IStoredClientOpts } from "../client.ts";
 import { MapWithDefault } from "../utils.ts";
 import { KnownMembership } from "../@types/membership.ts";
 
@@ -65,6 +65,7 @@ export class MemoryStore implements IStore {
     private pendingToDeviceBatches: IndexedToDeviceBatch[] = [];
     private nextToDeviceBatchId = 0;
     protected createUser?: UserCreator;
+    public readonly userProfiles = new Map<string, SyncUserProfile>();
 
     /**
      * Construct a new in-memory data store for the Matrix Client.
@@ -258,7 +259,9 @@ export class MemoryStore implements IStore {
             if (isValidFilterId(value)) {
                 return value;
             }
-        } catch {}
+        } catch {
+            // Do nothing
+        }
         return null;
     }
 
@@ -276,7 +279,9 @@ export class MemoryStore implements IStore {
             } else {
                 this.localStorage.removeItem(key);
             }
-        } catch {}
+        } catch {
+            // Do nothing
+        }
     }
 
     /**
@@ -287,13 +292,7 @@ export class MemoryStore implements IStore {
      */
     public storeAccountDataEvents(events: MatrixEvent[]): void {
         events.forEach((event) => {
-            // MSC3391: an event with content of {} should be interpreted as deleted
-            const isDeleted = !Object.keys(event.getContent()).length;
-            if (isDeleted) {
-                this.accountData.delete(event.getType());
-            } else {
-                this.accountData.set(event.getType(), event);
-            }
+            this.accountData.set(event.getType(), event);
         });
     }
 
@@ -440,6 +439,22 @@ export class MemoryStore implements IStore {
     public removeToDeviceBatch(id: number): Promise<void> {
         this.pendingToDeviceBatches = this.pendingToDeviceBatches.filter((batch) => batch.id !== id);
         return Promise.resolve();
+    }
+
+    public async getUserProfile(userId: string): Promise<SyncUserProfile | undefined> {
+        return this.userProfiles.get(userId);
+    }
+
+    public async storeUserProfiles(userProfiles: Map<string, SyncUserProfile>): Promise<void> {
+        userProfiles.forEach((profile, userId) => this.userProfiles.set(userId, profile));
+    }
+
+    public async removeUserProfiles(userIds: string[]): Promise<void> {
+        userIds.forEach((userId) => this.userProfiles.delete(userId));
+    }
+
+    public async removeEventsFromRoom(roomId: string, eventIds: string[]): Promise<void> {
+        // Can ignore as there is no backing store.
     }
 
     public async destroy(): Promise<void> {

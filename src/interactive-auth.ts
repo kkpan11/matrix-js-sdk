@@ -17,11 +17,9 @@ limitations under the License.
 */
 
 import { logger } from "./logger.ts";
-import { MatrixClient } from "./client.ts";
-import { defer, IDeferred } from "./utils.ts";
+import { type MatrixClient } from "./client.ts";
 import { MatrixError } from "./http-api/index.ts";
-import { UIAResponse } from "./@types/uia.ts";
-import { UserIdentifier } from "./@types/auth.ts";
+import { type UserIdentifier } from "./@types/auth.ts";
 
 const EMAIL_STAGE_TYPE = "m.login.email.identity";
 const MSISDN_STAGE_TYPE = "m.login.msisdn";
@@ -87,6 +85,11 @@ export enum AuthType {
     // use the stable "m.login.registration_token" type.
     // The authentication flow is the same in both cases.
     UnstableRegistrationToken = "org.matrix.msc3231.login.registration_token",
+    /**
+     * m.oauth stage introduced by MSC4312:
+     * https://spec.matrix.org/v1.17/client-server-api/#oauth-authentication
+     */
+    OAuth = "m.oauth",
 }
 
 /**
@@ -134,6 +137,7 @@ export type AuthDict =
     | RecaptchaDict
     | EmailIdentityDict
     | { type: Exclude<string, AuthType>; [key: string]: any }
+    // eslint-disable-next-line @typescript-eslint/no-empty-object-type
     | {};
 
 export class NoAuthFlowFoundError extends Error {
@@ -141,7 +145,6 @@ export class NoAuthFlowFoundError extends Error {
 
     public constructor(
         m: string,
-        // eslint-disable-next-line @typescript-eslint/naming-convention, camelcase
         public readonly required_stages: string[],
         public readonly flows: UIAFlow[],
     ) {
@@ -158,7 +161,7 @@ export class NoAuthFlowFoundError extends Error {
  *
  * The generic parameter `T` is the type of the response of the endpoint, once it is eventually successful.
  */
-export type UIAuthCallback<T> = (makeRequest: (authData: AuthDict | null) => Promise<UIAResponse<T>>) => Promise<T>;
+export type UIAuthCallback<T> = (makeRequest: (authData: AuthDict | null) => Promise<T>) => Promise<T>;
 
 interface IOpts<T> {
     /**
@@ -201,7 +204,7 @@ interface IOpts<T> {
      * The busyChanged callback should be used instead of the background flag.
      * Should return a promise which resolves to the successful response or rejects with a MatrixError.
      */
-    doRequest(auth: AuthDict | null, background: boolean): Promise<T>;
+    doRequest(this: void, auth: AuthDict | null, background: boolean): Promise<T>;
     /**
      * Called when the status of the UI auth changes,
      * ie. when the state of an auth stage changes of when the auth flow moves to a new stage.
@@ -215,7 +218,7 @@ interface IOpts<T> {
      *     m.login.email.identity:
      *         * emailSid: string, the sid of the active email auth session
      */
-    stateUpdated(nextStage: AuthType | string, status: IStageStatus): void;
+    stateUpdated(this: void, nextStage: AuthType | string, status: IStageStatus): void;
 
     /**
      * A function that takes the email address (string), clientSecret (string), attempt number (int) and
@@ -223,14 +226,20 @@ interface IOpts<T> {
      * function.
      * If the resulting promise rejects, the rejection will propagate through to the attemptAuth promise.
      */
-    requestEmailToken(email: string, secret: string, attempt: number, session: string): Promise<{ sid: string }>;
+    requestEmailToken(
+        this: void,
+        email: string,
+        secret: string,
+        attempt: number,
+        session: string,
+    ): Promise<{ sid: string }>;
     /**
      * Called whenever the interactive auth logic becomes busy submitting information provided by the user or finishes.
      * After this has been called with true the UI should indicate that a request is in progress
      * until it is called again with false.
      */
-    busyChanged?(busy: boolean): void;
-    startAuthStage?(nextStage: string): Promise<void>; // LEGACY
+    busyChanged?(this: void, busy: boolean): void;
+    startAuthStage?(this: void, nextStage: string): Promise<void>; // LEGACY
 }
 
 /**
@@ -262,7 +271,7 @@ export class InteractiveAuth<T> {
     private data: IAuthData & MatrixError["data"];
     private emailSid?: string;
     private requestingEmailToken = false;
-    private attemptAuthDeferred: IDeferred<T> | null = null;
+    private attemptAuthDeferred: PromiseWithResolvers<T> | null = null;
     private chosenFlow: UIAFlow | null = null;
     private currentStage: string | null = null;
 
@@ -298,7 +307,7 @@ export class InteractiveAuth<T> {
     public async attemptAuth(): Promise<T> {
         // This promise will be quite long-lived and will resolve when the
         // request is authenticated and completes successfully.
-        this.attemptAuthDeferred = defer();
+        this.attemptAuthDeferred = Promise.withResolvers();
         // pluck the promise out now, as doRequest may clear before we return
         const promise = this.attemptAuthDeferred.promise;
 
@@ -410,21 +419,24 @@ export class InteractiveAuth<T> {
         // if we're currently trying a request, wait for it to finish
         // as otherwise we can get multiple 200 responses which can mean
         // things like multiple logins for register requests.
-        // (but discard any exceptions as we only care when its done,
-        // not whether it worked or not)
         while (this.submitPromise) {
             try {
                 await this.submitPromise;
-            } catch {}
+            } catch {
+                // discard any exceptions as we only care when its done,
+                // not whether it worked or not
+            }
         }
 
         // use the sessionid from the last request, if one is present.
         let auth: AuthDict;
         if ((this.data as IAuthData)?.session) {
-            auth = {
-                session: (this.data as IAuthData).session,
-            };
-            Object.assign(auth, authData);
+            auth = Object.assign(
+                {
+                    session: (this.data as IAuthData).session,
+                },
+                authData,
+            );
         } else {
             auth = authData;
         }

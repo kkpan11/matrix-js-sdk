@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { mocked } from "jest-mock";
+import { type Mock } from "vitest";
 
 import { TestClient } from "../../TestClient";
 import {
@@ -28,9 +28,9 @@ import {
     CallDirection,
 } from "../../../src/webrtc/call";
 import {
-    MCallAnswer,
-    MCallHangupReject,
-    SDPStreamMetadata,
+    type MCallAnswer,
+    type MCallHangupReject,
+    type SDPStreamMetadata,
     SDPStreamMetadataKey,
     SDPStreamMetadataPurpose,
 } from "../../../src/webrtc/callEventTypes";
@@ -46,18 +46,20 @@ import {
     MockRTCRtpSender,
 } from "../../test-utils/webrtc";
 import { CallFeed } from "../../../src/webrtc/callFeed";
-import { EventType, IContent, ISendEventResponse, MatrixEvent, Room } from "../../../src";
+import { EventType, type IContent, type ISendEventResponse, type MatrixEvent, type Room } from "../../../src";
 import { emitPromise } from "../../test-utils/test-utils";
+import type { CryptoApi } from "../../../src/crypto-api";
+import { GroupCallUnknownDeviceError } from "../../../src/webrtc/groupCall";
 
 const FAKE_ROOM_ID = "!foo:bar";
 const CALL_LIFETIME = 60000;
 
 const startVoiceCall = async (client: TestClient, call: MatrixCall, userId?: string): Promise<void> => {
     const callPromise = call.placeVoiceCall();
-    await client.httpBackend!.flush("");
+    await client.httpBackend.flush("");
     await callPromise;
 
-    call.getOpponentMember = jest.fn().mockReturnValue({ userId: userId ?? "@bob:bar.uk" });
+    call.getOpponentMember = vi.fn().mockReturnValue({ userId: userId ?? "@bob:bar.uk" });
 };
 
 const startVideoCall = async (client: TestClient, call: MatrixCall, userId?: string): Promise<void> => {
@@ -65,12 +67,12 @@ const startVideoCall = async (client: TestClient, call: MatrixCall, userId?: str
     await client.httpBackend.flush("");
     await callPromise;
 
-    call.getOpponentMember = jest.fn().mockReturnValue({ userId: userId ?? "@bob:bar.uk" });
+    call.getOpponentMember = vi.fn().mockReturnValue({ userId: userId ?? "@bob:bar.uk" });
 };
 
 const fakeIncomingCall = async (client: TestClient, call: MatrixCall, version: string | number = "1") => {
     const callPromise = call.initWithInvite({
-        getContent: jest.fn().mockReturnValue({
+        getContent: vi.fn().mockReturnValue({
             version,
             call_id: "call_id",
             party_id: "remote_party_id",
@@ -114,7 +116,9 @@ describe("Call", function () {
     let prevDocument: Document;
     let prevWindow: Window & typeof globalThis;
     // We retain a reference to this in the correct Mock type
-    let mockSendEvent: jest.Mock<Promise<ISendEventResponse>, [string, string, IContent, string]>;
+    let mockSendEvent: Mock<
+        (roomId: string, eventType: string, content: IContent, txnId: string) => Promise<ISendEventResponse>
+    >;
 
     const errorListener = () => {};
 
@@ -128,7 +132,7 @@ describe("Call", function () {
         client = new TestClient("@alice:foo", "somedevice", "token", undefined, {});
         // We just stub out sendEvent: we're not interested in testing the client's
         // event sending code here
-        client.client.sendEvent = mockSendEvent = jest.fn();
+        client.client.sendEvent = mockSendEvent = vi.fn();
         {
             // in which we do naughty assignments to private members
             const untypedClient = client.client as any;
@@ -144,7 +148,7 @@ describe("Call", function () {
                 },
             } as unknown as Room;
         };
-        client.client.getProfileInfo = jest.fn();
+        client.client.getProfileInfo = vi.fn();
 
         call = new MatrixCall({
             client: client.client,
@@ -163,7 +167,7 @@ describe("Call", function () {
         globalThis.window = prevWindow;
         globalThis.document = prevDocument;
 
-        jest.useRealTimers();
+        vi.useRealTimers();
     });
 
     it("should ignore candidate events from non-matching party ID", async function () {
@@ -180,7 +184,7 @@ describe("Call", function () {
             }),
         );
 
-        const mockAddIceCandidate = (call.peerConn!.addIceCandidate = jest.fn());
+        const mockAddIceCandidate = (call.peerConn!.addIceCandidate = vi.fn());
         call.onRemoteIceCandidatesReceived(
             makeMockEvent("@test:foo", {
                 version: 1,
@@ -214,7 +218,7 @@ describe("Call", function () {
 
     it("should add candidates received before answer if party ID is correct", async function () {
         await startVoiceCall(client, call);
-        const mockAddIceCandidate = (call.peerConn!.addIceCandidate = jest.fn());
+        const mockAddIceCandidate = (call.peerConn!.addIceCandidate = vi.fn());
 
         call.onRemoteIceCandidatesReceived(
             makeMockEvent("@test:foo", {
@@ -277,7 +281,7 @@ describe("Call", function () {
             }),
         );
 
-        const identChangedCallback = jest.fn();
+        const identChangedCallback = vi.fn();
         call.on(CallEvent.AssertedIdentityChanged, identChangedCallback);
 
         await call.onAssertedIdentityReceived(
@@ -310,7 +314,7 @@ describe("Call", function () {
                 answer: {
                     sdp: DUMMY_SDP,
                 },
-                [SDPStreamMetadataKey]: {
+                [SDPStreamMetadataKey.name]: {
                     remote_stream: {
                         purpose: SDPStreamMetadataPurpose.Usermedia,
                         audio_muted: true,
@@ -346,17 +350,17 @@ describe("Call", function () {
             }),
         );
 
-        const mockScreenshareNoMetadata = ((call as any).setScreensharingEnabledWithoutMetadataSupport = jest.fn());
+        const mockScreenshareNoMetadata = ((call as any).setScreensharingEnabledWithoutMetadataSupport = vi.fn());
 
         call.setScreensharingEnabled(true);
         expect(mockScreenshareNoMetadata).toHaveBeenCalled();
     });
 
     it("should fallback to answering with no video", async () => {
-        await client.httpBackend!.flush("");
+        await client.httpBackend.flush("");
 
         (call as any).shouldAnswerWithMediaType = (wantedValue: boolean) => wantedValue;
-        client.client.getMediaHandler().getUserMediaStream = jest.fn().mockRejectedValue("reject");
+        client.client.getMediaHandler().getUserMediaStream = vi.fn().mockRejectedValue("reject");
 
         await call.answer(true, true);
 
@@ -365,7 +369,7 @@ describe("Call", function () {
     });
 
     it("should handle mid-call device changes", async () => {
-        client.client.getMediaHandler().getUserMediaStream = jest
+        client.client.getMediaHandler().getUserMediaStream = vi
             .fn()
             .mockReturnValue(
                 new MockMediaStream("stream", [
@@ -416,7 +420,7 @@ describe("Call", function () {
                 answer: {
                     sdp: DUMMY_SDP,
                 },
-                [SDPStreamMetadataKey]: {},
+                [SDPStreamMetadataKey.name]: {},
             }),
         );
 
@@ -434,7 +438,7 @@ describe("Call", function () {
     });
 
     it("should handle error on call upgrade", async () => {
-        const onError = jest.fn();
+        const onError = vi.fn();
         call.on(CallEvent.Error, onError);
 
         await startVoiceCall(client, call);
@@ -447,11 +451,11 @@ describe("Call", function () {
                 answer: {
                     sdp: DUMMY_SDP,
                 },
-                [SDPStreamMetadataKey]: {},
+                [SDPStreamMetadataKey.name]: {},
             }),
         );
 
-        const mockGetUserMediaStream = jest.fn().mockRejectedValue(new Error("Test error"));
+        const mockGetUserMediaStream = vi.fn().mockRejectedValue(new Error("Test error"));
         client.client.getMediaHandler().getUserMediaStream = mockGetUserMediaStream;
 
         // then unmute which should cause an upgrade
@@ -474,7 +478,7 @@ describe("Call", function () {
                 answer: {
                     sdp: DUMMY_SDP,
                 },
-                [SDPStreamMetadataKey]: {},
+                [SDPStreamMetadataKey.name]: {},
             }),
         );
 
@@ -500,7 +504,7 @@ describe("Call", function () {
 
         call.onSDPStreamMetadataChangedReceived(
             makeMockEvent("@test:foo", {
-                [SDPStreamMetadataKey]: {
+                [SDPStreamMetadataKey.name]: {
                     remote_stream: {
                         purpose: SDPStreamMetadataPurpose.Screenshare,
                         audio_muted: true,
@@ -518,7 +522,7 @@ describe("Call", function () {
 
     it("should choose opponent member", async () => {
         const callPromise = call.placeVoiceCall();
-        await client.httpBackend!.flush("");
+        await client.httpBackend.flush("");
         await callPromise;
 
         const opponentMember = {
@@ -559,7 +563,7 @@ describe("Call", function () {
         beforeEach(async () => {
             // start an incoming  call, but add no feeds
             await call.initWithInvite({
-                getContent: jest.fn().mockReturnValue({
+                getContent: vi.fn().mockReturnValue({
                     version: "1",
                     call_id: "call_id",
                     party_id: "remote_party_id",
@@ -574,14 +578,14 @@ describe("Call", function () {
         });
 
         it("if no video", async () => {
-            call.getOpponentMember = jest.fn().mockReturnValue({ userId: "@bob:bar.uk" });
+            call.getOpponentMember = vi.fn().mockReturnValue({ userId: "@bob:bar.uk" });
 
             (call as any).pushRemoteFeed(new MockMediaStream("remote_stream1", []));
             expect(call.type).toBe(CallType.Voice);
         });
 
         it("if remote video", async () => {
-            call.getOpponentMember = jest.fn().mockReturnValue({ userId: "@bob:bar.uk" });
+            call.getOpponentMember = vi.fn().mockReturnValue({ userId: "@bob:bar.uk" });
 
             (call as any).pushRemoteFeed(
                 new MockMediaStream("remote_stream1", [new MockMediaStreamTrack("track_id", "video")]),
@@ -590,7 +594,7 @@ describe("Call", function () {
         });
 
         it("if local video", async () => {
-            call.getOpponentMember = jest.fn().mockReturnValue({ userId: "@bob:bar.uk" });
+            call.getOpponentMember = vi.fn().mockReturnValue({ userId: "@bob:bar.uk" });
 
             // since this is testing for the presence of a local sender, we need to add a transciever
             // rather than just a source track
@@ -623,14 +627,12 @@ describe("Call", function () {
                 videoMuted: false,
             }),
         ]);
-        await client.httpBackend!.flush("");
+        await client.httpBackend.flush("");
         await callPromise;
-        call.getOpponentMember = jest.fn().mockReturnValue({ userId: "@bob:bar.uk" });
+        call.getOpponentMember = vi.fn().mockReturnValue({ userId: "@bob:bar.uk" });
 
         (call as any).pushNewLocalFeed(
-            new MockMediaStream("local_stream2", [
-                new MockMediaStreamTrack("track_id", "video"),
-            ]) as unknown as MediaStream,
+            new MockMediaStream("local_stream2", [new MockMediaStreamTrack("track_id", "video")]),
             SDPStreamMetadataPurpose.Screenshare,
         );
         await call.setMicrophoneMuted(true);
@@ -675,9 +677,9 @@ describe("Call", function () {
                 videoMuted: false,
             }),
         ]);
-        await client.httpBackend!.flush("");
+        await client.httpBackend.flush("");
         await callPromise;
-        call.getOpponentMember = jest.fn().mockReturnValue({ userId: "@bob:bar.uk" });
+        call.getOpponentMember = vi.fn().mockReturnValue({ userId: "@bob:bar.uk" });
 
         (call as any).updateRemoteSDPStreamMetadata({
             remote_usermedia_stream_id: {
@@ -709,7 +711,7 @@ describe("Call", function () {
     it("should end call after receiving a select event with a different party id", async () => {
         await fakeIncomingCall(client, call);
 
-        const callHangupCallback = jest.fn();
+        const callHangupCallback = vi.fn();
         call.on(CallEvent.Hangup, callHangupCallback);
 
         await call.onSelectAnswerReceived(
@@ -761,7 +763,7 @@ describe("Call", function () {
     it("should handle creating a data channel", async () => {
         await startVoiceCall(client, call);
 
-        const dataChannelCallback = jest.fn();
+        const dataChannelCallback = vi.fn();
         call.on(CallEvent.DataChannel, dataChannelCallback);
 
         const dataChannel = call.createDataChannel("data_channel_label", { id: 123 });
@@ -774,7 +776,7 @@ describe("Call", function () {
     it("should emit a data channel event when the other side adds a data channel", async () => {
         await startVoiceCall(client, call);
 
-        const dataChannelCallback = jest.fn();
+        const dataChannelCallback = vi.fn();
         call.on(CallEvent.DataChannel, dataChannelCallback);
 
         (call.peerConn as unknown as MockRTCPeerConnection).triggerIncomingDataChannel();
@@ -822,14 +824,14 @@ describe("Call", function () {
 
     describe("ignoring streams with ids for which we already have a feed", () => {
         const STREAM_ID = "stream_id";
-        let FEEDS_CHANGED_CALLBACK: jest.Mock<void, []>;
+        let FEEDS_CHANGED_CALLBACK: Mock<() => void>;
 
         beforeEach(async () => {
-            FEEDS_CHANGED_CALLBACK = jest.fn();
+            FEEDS_CHANGED_CALLBACK = vi.fn();
 
             await startVoiceCall(client, call);
             call.on(CallEvent.FeedsChanged, FEEDS_CHANGED_CALLBACK);
-            jest.spyOn(call, "pushLocalFeed");
+            vi.spyOn(call, "pushLocalFeed");
         });
 
         afterEach(() => {
@@ -845,7 +847,7 @@ describe("Call", function () {
                     answer: {
                         sdp: DUMMY_SDP,
                     },
-                    [SDPStreamMetadataKey]: {
+                    [SDPStreamMetadataKey.name]: {
                         [STREAM_ID]: {
                             purpose: SDPStreamMetadataPurpose.Usermedia,
                         },
@@ -882,7 +884,7 @@ describe("Call", function () {
     describe("transferToCall", () => {
         it("should send the required events", async () => {
             const targetCall = new MatrixCall({ client: client.client, roomId: "!roomId:server" });
-            const sendEvent = jest.spyOn(client.client, "sendEvent");
+            const sendEvent = vi.spyOn(client.client, "sendEvent");
             await call.transferToCall(targetCall);
 
             const newCallId = (sendEvent.mock.calls[0][2] as any)!.await_call;
@@ -897,14 +899,14 @@ describe("Call", function () {
     });
 
     describe("muting", () => {
-        let mockSendVoipEvent: jest.Mock<Promise<void>, [string, object]>;
+        let mockSendVoipEvent: Mock<MatrixCall["sendVoipEvent"]>;
         beforeEach(async () => {
-            (call as any).sendVoipEvent = mockSendVoipEvent = jest.fn();
+            (call as any).sendVoipEvent = mockSendVoipEvent = vi.fn();
             await startVideoCall(client, call);
         });
 
         afterEach(() => {
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         it("should not remove video sender on video mute", async () => {
@@ -913,19 +915,19 @@ describe("Call", function () {
         });
 
         it("should release camera after short delay on video mute", async () => {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
 
             await call.setLocalVideoMuted(true);
 
-            jest.advanceTimersByTime(500);
+            vi.advanceTimersByTime(500);
 
             expect(call.hasLocalUserMediaVideoTrack).toBe(false);
         });
 
         it("should re-request video feed on video unmute if it doesn't have one", async () => {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
 
-            const mockGetUserMediaStream = jest
+            const mockGetUserMediaStream = vi
                 .fn()
                 .mockReturnValue(client.client.getMediaHandler().getUserMediaStream(true, true));
 
@@ -933,7 +935,7 @@ describe("Call", function () {
 
             await call.setLocalVideoMuted(true);
 
-            jest.advanceTimersByTime(500);
+            vi.advanceTimersByTime(500);
 
             await call.setLocalVideoMuted(false);
 
@@ -941,7 +943,7 @@ describe("Call", function () {
         });
 
         it("should not release camera on fast mute and unmute", async () => {
-            const mockGetUserMediaStream = jest.fn();
+            const mockGetUserMediaStream = vi.fn();
 
             client.client.getMediaHandler().getUserMediaStream = mockGetUserMediaStream;
 
@@ -955,8 +957,8 @@ describe("Call", function () {
         describe("sending sdp_stream_metadata_changed events", () => {
             it("should send sdp_stream_metadata_changed when muting audio", async () => {
                 await call.setMicrophoneMuted(true);
-                expect(mockSendVoipEvent).toHaveBeenCalledWith(EventType.CallSDPStreamMetadataChangedPrefix, {
-                    [SDPStreamMetadataKey]: {
+                expect(mockSendVoipEvent).toHaveBeenCalledWith(EventType.CallSDPStreamMetadataChanged, {
+                    [SDPStreamMetadataKey.name]: {
                         mock_stream_from_media_handler: {
                             purpose: SDPStreamMetadataPurpose.Usermedia,
                             audio_muted: true,
@@ -968,8 +970,8 @@ describe("Call", function () {
 
             it("should send sdp_stream_metadata_changed when muting video", async () => {
                 await call.setLocalVideoMuted(true);
-                expect(mockSendVoipEvent).toHaveBeenCalledWith(EventType.CallSDPStreamMetadataChangedPrefix, {
-                    [SDPStreamMetadataKey]: {
+                expect(mockSendVoipEvent).toHaveBeenCalledWith(EventType.CallSDPStreamMetadataChanged, {
+                    [SDPStreamMetadataKey.name]: {
                         mock_stream_from_media_handler: {
                             purpose: SDPStreamMetadataPurpose.Usermedia,
                             audio_muted: false,
@@ -997,7 +999,7 @@ describe("Call", function () {
                 );
                 call.onSDPStreamMetadataChangedReceived({
                     getContent: () => ({
-                        [SDPStreamMetadataKey]: metadata,
+                        [SDPStreamMetadataKey.name]: metadata,
                     }),
                 } as MatrixEvent);
                 return metadata;
@@ -1096,9 +1098,11 @@ describe("Call", function () {
                         realSetTimeout(resolve, 100);
                     });
                 }
-                // We might not always be in fake timer mode, but it's
-                // fine to run this if not, so we just call it anyway.
-                jest.runOnlyPendingTimers();
+
+                if (vi.isFakeTimers()) {
+                    vi.runOnlyPendingTimers();
+                }
+
                 try {
                     expect(mockSendEvent).toHaveBeenCalledWith(...args);
                     return;
@@ -1132,7 +1136,7 @@ describe("Call", function () {
                     candidate: fakeCandidateString,
                     sdpMLineIndex: 0,
                     sdpMid: "0",
-                    toJSON: jest.fn().mockReturnValue(fakeCandidateString),
+                    toJSON: vi.fn().mockReturnValue(fakeCandidateString),
                 },
             } as unknown as RTCPeerConnectionIceEvent;
 
@@ -1143,7 +1147,7 @@ describe("Call", function () {
             });
 
             afterEach(() => {
-                jest.useRealTimers();
+                vi.useRealTimers();
             });
 
             it("sends ICE candidates as separate events if they arrive after the answer", async () => {
@@ -1159,7 +1163,7 @@ describe("Call", function () {
             });
 
             it("retries sending ICE candidates", async () => {
-                jest.useFakeTimers();
+                vi.useFakeTimers();
 
                 mockSendEvent.mockRejectedValueOnce(new Error("Fake error"));
 
@@ -1185,7 +1189,7 @@ describe("Call", function () {
             });
 
             it("gives up on call after 5 attempts at sending ICE candidates", async () => {
-                jest.useFakeTimers();
+                vi.useFakeTimers();
 
                 mockSendEvent.mockImplementation((roomId: string, eventType: string) => {
                     if (eventType === EventType.CallCandidates) {
@@ -1198,7 +1202,7 @@ describe("Call", function () {
                 mockPeerConn!.iceCandidateListener!(fakeCandidateEvent);
 
                 while (!call.callHasEnded()) {
-                    jest.runOnlyPendingTimers();
+                    vi.runOnlyPendingTimers();
                     await untilEventSent(
                         FAKE_ROOM_ID,
                         EventType.CallCandidates,
@@ -1217,12 +1221,12 @@ describe("Call", function () {
     });
 
     it("times out an incoming call", async () => {
-        jest.useFakeTimers();
+        vi.useFakeTimers();
         await fakeIncomingCall(client, call, "1");
 
         expect(call.state).toEqual(CallState.Ringing);
 
-        jest.advanceTimersByTime(CALL_LIFETIME + 1000);
+        vi.advanceTimersByTime(CALL_LIFETIME + 1000);
 
         expect(call.state).toEqual(CallState.Ended);
     });
@@ -1287,9 +1291,9 @@ describe("Call", function () {
                 FAKE_ROOM_ID,
                 EventType.CallNegotiate,
                 expect.objectContaining({
-                    "version": "1",
-                    "call_id": call.callId,
-                    "org.matrix.msc3077.sdp_stream_metadata": expect.objectContaining({
+                    version: "1",
+                    call_id: call.callId,
+                    sdp_stream_metadata: expect.objectContaining({
                         [SCREENSHARE_STREAM_ID]: expect.objectContaining({
                             purpose: SDPStreamMetadataPurpose.Screenshare,
                         }),
@@ -1305,7 +1309,7 @@ describe("Call", function () {
         });
 
         it("removes RTX codec from screen sharing transcievers", async () => {
-            mocked(globalThis.RTCRtpSender.getCapabilities).mockReturnValue({
+            vi.mocked(globalThis.RTCRtpSender.getCapabilities).mockReturnValue({
                 codecs: [
                     { mimeType: "video/rtx", clockRate: 90000 },
                     { mimeType: "video/somethingelse", clockRate: 90000 },
@@ -1379,7 +1383,7 @@ describe("Call", function () {
         MockRTCPeerConnection.triggerAllNegotiations();
 
         const mockVideoSender = call.peerConn!.getSenders().find((s) => s.track!.kind === "video");
-        const mockReplaceTrack = (mockVideoSender!.replaceTrack = jest.fn());
+        const mockReplaceTrack = (mockVideoSender!.replaceTrack = vi.fn());
 
         await call.setScreensharingEnabled(true);
 
@@ -1420,7 +1424,7 @@ describe("Call", function () {
         const BOB_AVATAR_URL = "avatar.bob.foo";
 
         beforeEach(() => {
-            mocked(client.client.getProfileInfo).mockImplementation(async (userId) => {
+            vi.mocked(client.client.getProfileInfo).mockImplementation(async (userId) => {
                 if (userId === ALICE_USER_ID) {
                     return {
                         displayname: ALICE_DISPLAY_NAME,
@@ -1443,8 +1447,8 @@ describe("Call", function () {
                 roomId: FAKE_ROOM_ID,
             });
 
-            const callHangupListener = jest.fn();
-            const newCallHangupListener = jest.fn();
+            const callHangupListener = vi.fn();
+            const newCallHangupListener = vi.fn();
 
             call.on(CallEvent.Hangup, callHangupListener);
             newCall.on(CallEvent.Error, () => {});
@@ -1484,7 +1488,7 @@ describe("Call", function () {
 
         it("transfers a call to another user", async () => {
             // @ts-ignore Mock
-            jest.spyOn(call, "terminate");
+            vi.spyOn(call, "terminate");
 
             await startVoiceCall(client, call, ALICE_USER_ID);
             await call.transfer(BOB_USER_ID);
@@ -1508,7 +1512,7 @@ describe("Call", function () {
     describe("onTrack", () => {
         it("ignores streamless track", async () => {
             // @ts-ignore Mock pushRemoteFeed() is private
-            jest.spyOn(call, "pushRemoteFeed");
+            vi.spyOn(call, "pushRemoteFeed");
 
             await call.placeVoiceCall();
 
@@ -1523,7 +1527,7 @@ describe("Call", function () {
 
         it("correctly pushes", async () => {
             // @ts-ignore Mock pushRemoteFeed() is private
-            jest.spyOn(call, "pushRemoteFeed");
+            vi.spyOn(call, "pushRemoteFeed");
 
             await call.placeVoiceCall();
             await call.onAnswerReceived(
@@ -1564,7 +1568,7 @@ describe("Call", function () {
             expect(call.callHasEnded()).toBe(false);
 
             await call.initWithInvite({
-                getContent: jest.fn().mockReturnValue({
+                getContent: vi.fn().mockReturnValue({
                     version: "1",
                     call_id: "call_id",
                     party_id: "remote_party_id",
@@ -1624,16 +1628,16 @@ describe("Call", function () {
 
     it("should correctly emit LengthChanged", async () => {
         const advanceByArray = [2, 3, 5];
-        const lengthChangedListener = jest.fn();
+        const lengthChangedListener = vi.fn();
 
-        jest.useFakeTimers();
+        vi.useFakeTimers();
         call.addListener(CallEvent.LengthChanged, lengthChangedListener);
         await fakeIncomingCall(client, call, "1");
         (call.peerConn as unknown as MockRTCPeerConnection).iceConnectionStateChangeListener!();
 
         let hasAdvancedBy = 0;
         for (const advanceBy of advanceByArray) {
-            jest.advanceTimersByTime(advanceBy * 1000);
+            vi.advanceTimersByTime(advanceBy * 1000);
             hasAdvancedBy += advanceBy;
 
             expect(lengthChangedListener).toHaveBeenCalledTimes(hasAdvancedBy);
@@ -1645,24 +1649,24 @@ describe("Call", function () {
         let mockPeerConn: MockRTCPeerConnection;
 
         beforeEach(async () => {
-            jest.useFakeTimers();
-            jest.spyOn(call, "hangup");
+            vi.useFakeTimers();
+            vi.spyOn(call, "hangup");
             await fakeIncomingCall(client, call, "1");
 
             mockPeerConn = call.peerConn as unknown as MockRTCPeerConnection;
 
             mockPeerConn.iceConnectionState = "disconnected";
             mockPeerConn.iceConnectionStateChangeListener!();
-            jest.spyOn(mockPeerConn, "restartIce");
+            vi.spyOn(mockPeerConn, "restartIce");
         });
 
         it("should restart ICE gathering after being disconnected for 2 seconds", () => {
-            jest.advanceTimersByTime(3 * 1000);
+            vi.advanceTimersByTime(3 * 1000);
             expect(mockPeerConn.restartIce).toHaveBeenCalled();
         });
 
         it("should hang up after being disconnected for 30 seconds", () => {
-            jest.advanceTimersByTime(31 * 1000);
+            vi.advanceTimersByTime(31 * 1000);
             expect(call.hangup).toHaveBeenCalledWith(CallErrorCode.IceFailed, false);
         });
 
@@ -1683,14 +1687,14 @@ describe("Call", function () {
         it("should not hangup if we've managed to re-connect", () => {
             mockPeerConn.iceConnectionState = "connected";
             mockPeerConn.iceConnectionStateChangeListener!();
-            jest.advanceTimersByTime(31 * 1000);
+            vi.advanceTimersByTime(31 * 1000);
             expect(call.hangup).not.toHaveBeenCalled();
         });
     });
 
     describe("Call replace", () => {
         it("Fires event when call replaced", async () => {
-            const onReplace = jest.fn();
+            const onReplace = vi.fn();
             call.on(CallEvent.Replaced, onReplace);
 
             await call.placeVoiceCall();
@@ -1713,13 +1717,13 @@ describe("Call", function () {
             call.hangup = () => null;
             call.isLocalOnHold = () => true;
             // @ts-ignore
-            call.updateRemoteSDPStreamMetadata = jest.fn();
+            call.updateRemoteSDPStreamMetadata = vi.fn();
             // @ts-ignore
-            call.getRidOfRTXCodecs = jest.fn();
+            call.getRidOfRTXCodecs = vi.fn();
             // @ts-ignore
-            call.createAnswer = jest.fn().mockResolvedValue({});
+            call.createAnswer = vi.fn().mockResolvedValue({});
             // @ts-ignore
-            call.sendVoipEvent = jest.fn();
+            call.sendVoipEvent = vi.fn();
         });
 
         it("and reject remote offer if not polite and have pending local offer", async () => {
@@ -1737,7 +1741,7 @@ describe("Call", function () {
             // @ts-ignore
             call.peerConn = {
                 signalingState: "have-local-offer",
-                setRemoteDescription: jest.fn(),
+                setRemoteDescription: vi.fn(),
             };
             await call.onNegotiateReceived(offerEvent);
             expect(call.peerConn?.setRemoteDescription).not.toHaveBeenCalled();
@@ -1765,7 +1769,7 @@ describe("Call", function () {
             // @ts-ignore
             call.peerConn = {
                 signalingState: "have-local-offer",
-                setRemoteDescription: jest.fn(),
+                setRemoteDescription: vi.fn(),
             };
             await call.onNegotiateReceived(offerEvent);
             expect(call.peerConn?.setRemoteDescription).toHaveBeenCalled();
@@ -1786,7 +1790,7 @@ describe("Call", function () {
             // @ts-ignore
             call.peerConn = {
                 signalingState: "stable",
-                setRemoteDescription: jest.fn(),
+                setRemoteDescription: vi.fn(),
             };
             await call.onNegotiateReceived(offerEvent);
             expect(call.peerConn?.setRemoteDescription).toHaveBeenCalled();
@@ -1807,7 +1811,7 @@ describe("Call", function () {
             // @ts-ignore
             call.peerConn = {
                 signalingState: "have-local-offer",
-                setRemoteDescription: jest.fn(),
+                setRemoteDescription: vi.fn(),
             };
             await call.onNegotiateReceived(offerEvent);
             expect(call.peerConn?.setRemoteDescription).toHaveBeenCalled();
@@ -1838,5 +1842,32 @@ describe("Call", function () {
 
         const err = await prom;
         expect(err.code).toBe(CallErrorCode.IceFailed);
+    });
+
+    it("should throw an error when trying to call 'placeCallWithCallFeeds' when crypto is enabled", async () => {
+        vi.spyOn(client.client, "getCrypto").mockReturnValue({} as unknown as CryptoApi);
+        call = new MatrixCall({
+            client: client.client,
+            roomId: FAKE_ROOM_ID,
+            opponentDeviceId: "opponent_device_id",
+            invitee: "invitee",
+        });
+        call.on(CallEvent.Error, vi.fn());
+
+        await expect(
+            call.placeCallWithCallFeeds([
+                new CallFeed({
+                    client: client.client,
+                    stream: new MockMediaStream("local_stream1", [
+                        new MockMediaStreamTrack("track_id", "audio"),
+                    ]) as unknown as MediaStream,
+                    userId: client.getUserId(),
+                    deviceId: undefined,
+                    purpose: SDPStreamMetadataPurpose.Usermedia,
+                    audioMuted: false,
+                    videoMuted: false,
+                }),
+            ]),
+        ).rejects.toThrow(new GroupCallUnknownDeviceError("invitee"));
     });
 });

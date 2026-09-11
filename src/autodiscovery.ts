@@ -15,9 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IClientWellKnown, IWellKnownConfig, IServerVersions } from "./client.ts";
+import { type IClientWellKnown, type IWellKnownConfig, type IServerVersions } from "./client.ts";
 import { logger } from "./logger.ts";
-import { MatrixError, Method, timeoutSignal } from "./http-api/index.ts";
+import { type MatrixError, Method, timeoutSignal } from "./http-api/index.ts";
 import { SUPPORTED_MATRIX_VERSIONS } from "./version-support.ts";
 
 // Dev note: Auto discovery is part of the spec.
@@ -193,7 +193,7 @@ export class AutoDiscovery {
 
         // Step 3.1: Non-spec check to ensure the server will actually work for us. We need to check if
         // any of the versions in `SUPPORTED_MATRIX_VERSIONS` are listed in the /versions response.
-        const hsVersionSet = new Set(hsVersions.raw!["versions"]);
+        const hsVersionSet = new Set(hsVersions.raw["versions"]);
         let supportedVersionFound = false;
         for (const version of SUPPORTED_MATRIX_VERSIONS) {
             if (hsVersionSet.has(version)) {
@@ -358,7 +358,7 @@ export class AutoDiscovery {
         }
 
         // Step 2: Validate and parse the config
-        return AutoDiscovery.fromDiscoveryConfig(wellknown.raw!);
+        return AutoDiscovery.fromDiscoveryConfig(wellknown.raw);
     }
 
     /**
@@ -462,7 +462,7 @@ export class AutoDiscovery {
                 };
             }
 
-            if (!response.ok) {
+            if (response.status !== 200) {
                 return {
                     raw: {},
                     action: AutoDiscoveryAction.FAIL_PROMPT,

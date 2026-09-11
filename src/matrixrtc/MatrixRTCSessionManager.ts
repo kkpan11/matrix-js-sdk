@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The Matrix.org Foundation C.I.C.
+Copyright 2023-2026 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { logger as rootLogger } from "../logger.ts";
-import { MatrixClient, ClientEvent } from "../client.ts";
+import { type Logger } from "../logger.ts";
+import { type MatrixClient, ClientEvent } from "../client.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
-import { Room, RoomEvent } from "../models/room.ts";
-import { RoomState, RoomStateEvent } from "../models/room-state.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type Room } from "../models/room.ts";
+import { RoomStateEvent } from "../models/room-state.ts";
+import { type MatrixEvent } from "../models/event.ts";
 import { MatrixRTCSession } from "./MatrixRTCSession.ts";
 import { EventType } from "../@types/event.ts";
-
-const logger = rootLogger.getChild("MatrixRTCSessionManager");
+import { type RtcSlotEventContent, type SlotDescription } from "./types.ts";
+import { computeSlotId } from "./utils.ts";
 
 export enum MatrixRTCSessionManagerEvents {
     // A member has joined the MatrixRTC session, creating an active session in a room where there wasn't previously
@@ -39,6 +39,9 @@ type EventHandlerMap = {
 
 /**
  * Holds all active MatrixRTC session objects and creates new ones as events arrive.
+ * One `MatrixRTCSessionManager` is required for each MatrixRTC sessionDescription (application, session id) that the client wants to support.
+ * If no application type is specified in the constructor, the default is "m.call".
+ *
  * This interface is UNSTABLE and may change without warning.
  */
 export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionManagerEvents, EventHandlerMap> {
@@ -50,33 +53,40 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
     // longer the correct session object for the room.
     private roomSessions = new Map<string, MatrixRTCSession>();
 
-    public constructor(private client: MatrixClient) {
+    private readonly logger: Logger;
+
+    public constructor(
+        rootLogger: Logger,
+        private client: MatrixClient,
+        private readonly slotDescription: SlotDescription = { application: "m.call", id: "ROOM" }, // Default to the Matrix Call application
+    ) {
         super();
+        this.logger = rootLogger.getChild(`[MatrixRTCSessionManager ${computeSlotId(slotDescription)}]`);
     }
 
     public start(): void {
         // We shouldn't need to null-check here, but matrix-client.spec.ts mocks getRooms
         // returning nothing, and breaks tests if you change it to return an empty array :'(
         for (const room of this.client.getRooms() ?? []) {
-            const session = MatrixRTCSession.roomSessionForRoom(this.client, room);
+            const session = MatrixRTCSession.sessionForSlot(this.client, room, this.slotDescription);
             if (session.memberships.length > 0) {
                 this.roomSessions.set(room.roomId, session);
             }
         }
 
         this.client.on(ClientEvent.Room, this.onRoom);
-        this.client.on(RoomEvent.Timeline, this.onTimeline);
+        this.client.on(ClientEvent.Event, this.onEvent);
         this.client.on(RoomStateEvent.Events, this.onRoomState);
     }
 
     public stop(): void {
         for (const sess of this.roomSessions.values()) {
-            sess.stop();
+            void sess.stop();
         }
         this.roomSessions.clear();
 
         this.client.off(ClientEvent.Room, this.onRoom);
-        this.client.off(RoomEvent.Timeline, this.onTimeline);
+        this.client.off(ClientEvent.Event, this.onEvent);
         this.client.off(RoomStateEvent.Events, this.onRoomState);
     }
 
@@ -89,77 +99,90 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
     }
 
     /**
+     * Reads the current slot state event's content for the given room's session.
+     *
+     * @returns The slot event's content, or `undefined` if no slot event exists for the session.
+     */
+    public getRtcSlot(room: Room): RtcSlotEventContent | undefined {
+        return this.getRoomSession(room).getRtcSlot();
+    }
+
+    /**
+     * Whether the given room's slot is closed.
+     *
+     * @returns `true` if the slot is closed, `false` if the slot is open or `undefined`
+     * if no slot exists.
+     */
+    public isSlotClosed(room: Room): boolean | undefined {
+        return this.getRoomSession(room).isSlotClosed();
+    }
+
+    /**
      * Gets the main MatrixRTC session for a room, returning an empty session
      * if no members are currently participating
      */
     public getRoomSession(room: Room): MatrixRTCSession {
         if (!this.roomSessions.has(room.roomId)) {
-            this.roomSessions.set(room.roomId, MatrixRTCSession.roomSessionForRoom(this.client, room));
+            this.roomSessions.set(
+                room.roomId,
+                MatrixRTCSession.sessionForSlot(this.client, room, this.slotDescription),
+            );
         }
 
         return this.roomSessions.get(room.roomId)!;
     }
 
-    private async consumeCallEncryptionEvent(event: MatrixEvent, isRetry = false): Promise<void> {
-        await this.client.decryptEventIfNeeded(event);
-        if (event.isDecryptionFailure()) {
-            if (!isRetry) {
-                logger.warn(
-                    `Decryption failed for event ${event.getId()}: ${event.decryptionFailureReason} will retry once only`,
-                );
-                // retry after 1 second. After this we give up.
-                setTimeout(() => this.consumeCallEncryptionEvent(event, true), 1000);
-            } else {
-                logger.warn(`Decryption failed for event ${event.getId()}: ${event.decryptionFailureReason}`);
-            }
-            return;
-        } else if (isRetry) {
-            logger.info(`Decryption succeeded for event ${event.getId()} after retry`);
-        }
-
-        if (event.getType() !== EventType.CallEncryptionKeysPrefix) return Promise.resolve();
-
-        const room = this.client.getRoom(event.getRoomId());
-        if (!room) {
-            logger.error(`Got room state event for unknown room ${event.getRoomId()}!`);
-            return Promise.resolve();
-        }
-
-        this.getRoomSession(room).onCallEncryption(event);
-    }
-    private onTimeline = (event: MatrixEvent): void => {
-        this.consumeCallEncryptionEvent(event);
-    };
-
     private onRoom = (room: Room): void => {
-        this.refreshRoom(room);
+        void this.refreshRoom(room);
     };
 
-    private onRoomState = (event: MatrixEvent, _state: RoomState): void => {
+    private readonly onEvent = (event: MatrixEvent): void => {
+        if (!event.unstableStickyExpiresAt) return; // Not sticky, not interested.
+
+        if (event.getType() !== EventType.RTCMembership) return;
+
+        const room = this.client.getRoom(event.getRoomId());
+        if (!room) return;
+
+        void this.refreshRoom(room);
+    };
+
+    private readonly onRoomState = (event: MatrixEvent): void => {
+        if (event.getType() !== EventType.GroupCallMemberPrefix && event.getType() !== EventType.RTCSlot) {
+            return;
+        }
         const room = this.client.getRoom(event.getRoomId());
         if (!room) {
-            logger.error(`Got room state event for unknown room ${event.getRoomId()}!`);
+            this.logger.error(`Got room state event for unknown room ${event.getRoomId()}!`);
             return;
         }
 
-        if (event.getType() == EventType.GroupCallMemberPrefix) {
-            this.refreshRoom(room);
-        }
+        void this.refreshRoom(room);
     };
 
-    private refreshRoom(room: Room): void {
+    private async refreshRoom(room: Room): Promise<void> {
         const isNewSession = !this.roomSessions.has(room.roomId);
-        const sess = this.getRoomSession(room);
+        const session = this.getRoomSession(room);
 
-        const wasActiveAndKnown = sess.memberships.length > 0 && !isNewSession;
+        const wasActiveAndKnown = session.memberships.length > 0 && !isNewSession;
+        // This needs to be here and the event listener cannot be setup in the MatrixRTCSession,
+        // because we need the update to happen between:
+        // wasActiveAndKnown = session.memberships.length > 0 and
+        // nowActive = session.memberships.length
+        // Alternatively we would need to setup some event emission when the RTC session ended.
+        // TODO we want to add the emission en session end. This makes the responsibility of the session manager more clear.
 
-        sess.onRTCSessionMemberUpdate();
+        await session._onRTCSessionMemberUpdate().catch((error) => {
+            this.logger.error(`Error updating RTC session members for ${room.roomId}: ${error}`);
+        });
 
-        const nowActive = sess.memberships.length > 0;
+        const nowActive = session.memberships.length > 0;
 
         if (wasActiveAndKnown && !nowActive) {
+            this.logger.trace(`Session ended for ${room.roomId} (${session.memberships.length} members)`);
             this.emit(MatrixRTCSessionManagerEvents.SessionEnded, room.roomId, this.roomSessions.get(room.roomId)!);
         } else if (!wasActiveAndKnown && nowActive) {
+            this.logger.trace(`Session started for ${room.roomId} (${session.memberships.length} members)`);
             this.emit(MatrixRTCSessionManagerEvents.SessionStarted, room.roomId, this.roomSessions.get(room.roomId)!);
         }
     }

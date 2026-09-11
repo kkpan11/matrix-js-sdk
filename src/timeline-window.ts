@@ -14,14 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { Optional } from "matrix-events-sdk";
-
-import { Direction, EventTimeline } from "./models/event-timeline.ts";
+import { type Direction, EventTimeline } from "./models/event-timeline.ts";
 import { logger } from "./logger.ts";
-import { MatrixClient } from "./client.ts";
-import { EventTimelineSet } from "./models/event-timeline-set.ts";
-import { MatrixEvent } from "./models/event.ts";
-import { Room, RoomEvent } from "./models/room.ts";
+import { type MatrixClient } from "./client.ts";
+import { type EventTimelineSet } from "./models/event-timeline-set.ts";
+import { type MatrixEvent } from "./models/event.ts";
+import { type Room, RoomEvent } from "./models/room.ts";
 
 /**
  * @internal
@@ -105,7 +103,7 @@ export class TimelineWindow {
     public load(initialEventId?: string, initialWindowSize = 20): Promise<void> {
         // given an EventTimeline, find the event we were looking for, and initialise our
         // fields so that the event in question is in the middle of the window.
-        const initFields = (timeline: Optional<EventTimeline>): void => {
+        const initFields = (timeline: EventTimeline | null): void => {
             if (!timeline) {
                 throw new Error("No timeline given to initFields");
             }
@@ -396,7 +394,6 @@ export class TimelineWindow {
         // iterate through each timeline between this.start and this.end
         // (inclusive).
         let timeline: EventTimeline | null = this.start.timeline;
-        // eslint-disable-next-line no-constant-condition
         while (timeline) {
             const events = timeline.getEvents();
 

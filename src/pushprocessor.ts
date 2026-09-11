@@ -15,27 +15,27 @@ limitations under the License.
 */
 
 import { deepCompare, escapeRegExp, globToRegexp, isNullOrUndefined } from "./utils.ts";
-import { logger } from "./logger.ts";
-import { MatrixClient } from "./client.ts";
-import { MatrixEvent } from "./models/event.ts";
+import { type Logger } from "./logger.ts";
+import { type MatrixClient } from "./client.ts";
+import { type MatrixEvent } from "./models/event.ts";
 import {
     ConditionKind,
-    IAnnotatedPushRule,
-    ICallStartedCondition,
-    ICallStartedPrefixCondition,
-    IContainsDisplayNameCondition,
-    IEventMatchCondition,
-    IEventPropertyContainsCondition,
-    IEventPropertyIsCondition,
-    IPushRule,
-    IPushRules,
-    IRoomMemberCountCondition,
-    ISenderNotificationPermissionCondition,
-    PushRuleAction,
+    type IAnnotatedPushRule,
+    type ICallStartedCondition,
+    type ICallStartedPrefixCondition,
+    type IContainsDisplayNameCondition,
+    type IEventMatchCondition,
+    type IEventPropertyContainsCondition,
+    type IEventPropertyIsCondition,
+    type IPushRule,
+    type IPushRules,
+    type IRoomMemberCountCondition,
+    type ISenderNotificationPermissionCondition,
+    type PushRuleAction,
     PushRuleActionName,
-    PushRuleCondition,
+    type PushRuleCondition,
     PushRuleKind,
-    PushRuleSet,
+    type PushRuleSet,
     RuleId,
     TweakName,
 } from "./@types/PushRules.ts";
@@ -170,6 +170,7 @@ const EXPECTED_DEFAULT_UNDERRIDE_RULE_IDS: OrderedRules = [
 /**
  * Make sure that each of the rules listed in `defaultRuleIds` is listed in the given set of push rules.
  *
+ * @param logger - A `Logger` to write log messages to.
  * @param kind - the kind of push rule set being merged.
  * @param incomingRules - the existing set of known push rules for the user.
  * @param defaultRules - a lookup table for the default definitions of push rules.
@@ -178,6 +179,7 @@ const EXPECTED_DEFAULT_UNDERRIDE_RULE_IDS: OrderedRules = [
  * @returns A copy of `incomingRules`, with any missing default rules inserted in the right place.
  */
 function mergeRulesWithDefaults(
+    logger: Logger,
     kind: PushRuleKind,
     incomingRules: IPushRule[],
     defaultRules: Record<string, IPushRule>,
@@ -276,22 +278,29 @@ export class PushProcessor {
      * Rewrites conditions on a client's push rules to match the defaults
      * where applicable. Useful for upgrading push rules to more strict
      * conditions when the server is falling behind on defaults.
+     *
+     * @param logger - A `Logger` to write log messages to.
      * @param incomingRules - The client's existing push rules
      * @param userId - The Matrix ID of the client.
      * @returns The rewritten rules
      */
-    public static rewriteDefaultRules(incomingRules: IPushRules, userId: string | undefined = undefined): IPushRules {
+    public static rewriteDefaultRules(
+        logger: Logger,
+        incomingRules: IPushRules,
+        userId: string | undefined = undefined,
+    ): IPushRules {
         let newRules: IPushRules = JSON.parse(JSON.stringify(incomingRules)); // deep clone
 
         // These lines are mostly to make the tests happy. We shouldn't run into these
         // properties missing in practice.
         if (!newRules) newRules = {} as IPushRules;
-        if (!newRules.global) newRules.global = {} as PushRuleSet;
+        if (!newRules.global) newRules.global = {};
         if (!newRules.global.override) newRules.global.override = [];
         if (!newRules.global.underride) newRules.global.underride = [];
 
         // Merge the client-level defaults with the ones from the server
         newRules.global.override = mergeRulesWithDefaults(
+            logger,
             PushRuleKind.Override,
             newRules.global.override,
             DEFAULT_OVERRIDE_RULES,
@@ -299,6 +308,7 @@ export class PushProcessor {
         );
 
         newRules.global.underride = mergeRulesWithDefaults(
+            logger,
             PushRuleKind.Underride,
             newRules.global.underride,
             DEFAULT_UNDERRIDE_RULES,
@@ -306,6 +316,28 @@ export class PushProcessor {
         );
 
         return newRules;
+    }
+
+    /**
+     * Create a RegExp object for the given glob pattern with a single capture group around the pattern itself, caching the result.
+     * No cache invalidation is present currently,
+     * as this will be inherently bounded to the size of the user's own push rules.
+     * @param pattern - the glob pattern to convert to a RegExp
+     * @param alignToWordBoundary - whether to align the pattern to word boundaries,
+     *     as specified for `content.body` matches, will use lookaround assertions to ensure the match only includes the pattern
+     * @param flags - the flags to pass to the RegExp constructor, defaults to case-insensitive
+     */
+    public static getPushRuleGlobRegex(pattern: string, alignToWordBoundary = false, flags = "i"): RegExp {
+        const [prefix, suffix] = alignToWordBoundary ? ["(?<=^|\\W)", "(?=\\W|$)"] : ["^", "$"];
+        const cacheKey = `${alignToWordBoundary}-${flags}-${pattern}`;
+
+        if (!PushProcessor.cachedGlobToRegex[cacheKey]) {
+            PushProcessor.cachedGlobToRegex[cacheKey] = new RegExp(
+                prefix + "(" + globToRegexp(pattern) + ")" + suffix,
+                flags,
+            );
+        }
+        return PushProcessor.cachedGlobToRegex[cacheKey];
     }
 
     /**
@@ -317,7 +349,7 @@ export class PushProcessor {
         // These lines are mostly to make the tests happy. We shouldn't run into these
         // properties missing in practice.
         if (!newRules) newRules = {} as IPushRules;
-        if (!newRules.global) newRules.global = {} as PushRuleSet;
+        if (!newRules.global) newRules.global = {};
         if (!newRules.global.override) newRules.global.override = [];
         if (!newRules.global.room) newRules.global.room = [];
         if (!newRules.global.sender) newRules.global.sender = [];
@@ -567,11 +599,9 @@ export class PushProcessor {
             return false;
         }
 
-        const regex =
-            cond.key === "content.body"
-                ? this.createCachedRegex("(^|\\W)", cond.pattern, "(\\W|$)")
-                : this.createCachedRegex("^", cond.pattern, "$");
-
+        // Align to word boundary on `content.body` matches, whole string otherwise
+        // https://spec.matrix.org/v1.13/client-server-api/#conditions-1
+        const regex = PushProcessor.getPushRuleGlobRegex(cond.pattern, cond.key === "content.body");
         return !!val.match(regex);
     }
 
@@ -619,17 +649,6 @@ export class PushProcessor {
             (ev.getPrevContent()["m.terminated"] !== ev.getContent()["m.terminated"] ||
                 deepCompare(ev.getPrevContent(), {}))
         );
-    }
-
-    private createCachedRegex(prefix: string, glob: string, suffix: string): RegExp {
-        if (PushProcessor.cachedGlobToRegex[glob]) {
-            return PushProcessor.cachedGlobToRegex[glob];
-        }
-        PushProcessor.cachedGlobToRegex[glob] = new RegExp(
-            prefix + globToRegexp(glob) + suffix,
-            "i", // Case insensitive
-        );
-        return PushProcessor.cachedGlobToRegex[glob];
     }
 
     /**
@@ -827,7 +846,7 @@ export class PushProcessor {
             for (const kind of RULEKINDS_IN_ORDER) {
                 if (this.client.pushRules[scope][kind] === undefined) continue;
 
-                for (const rule of this.client.pushRules[scope][kind]!) {
+                for (const rule of this.client.pushRules[scope][kind]) {
                     if (rule.rule_id === ruleId) return { rule, kind };
                 }
             }

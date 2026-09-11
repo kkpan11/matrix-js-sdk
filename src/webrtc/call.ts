@@ -21,38 +21,36 @@ limitations under the License.
  * This is an internal module. See {@link createNewMatrixCall} for the public API.
  */
 
-import { v4 as uuidv4 } from "uuid";
 import { parse as parseSdp, write as writeSdp } from "sdp-transform";
 
 import { logger } from "../logger.ts";
 import { checkObjectHasKeys, isNullOrUndefined, recursivelyAssign } from "../utils.ts";
-import { MatrixEvent } from "../models/event.ts";
-import { EventType, TimelineEvents, ToDeviceMessageId } from "../@types/event.ts";
-import { RoomMember } from "../models/room-member.ts";
-import { randomString } from "../randomstring.ts";
+import { type MatrixEvent } from "../models/event.ts";
+import { EventType, type TimelineEvents, ToDeviceMessageId } from "../@types/event.ts";
+import { type RoomMember } from "../models/room-member.ts";
+import { secureRandomString } from "../randomstring.ts";
 import {
-    MCallReplacesEvent,
-    MCallAnswer,
-    MCallInviteNegotiate,
-    CallCapabilities,
+    type MCallReplacesEvent,
+    type MCallAnswer,
+    type MCallInviteNegotiate,
+    type CallCapabilities,
     SDPStreamMetadataPurpose,
-    SDPStreamMetadata,
+    type SDPStreamMetadata,
     SDPStreamMetadataKey,
-    MCallSDPStreamMetadataChanged,
-    MCallSelectAnswer,
-    MCAllAssertedIdentity,
-    MCallCandidates,
-    MCallBase,
-    MCallHangupReject,
+    type MCallSDPStreamMetadataChanged,
+    type MCallSelectAnswer,
+    type MCAllAssertedIdentity,
+    type MCallCandidates,
+    type MCallBase,
+    type MCallHangupReject,
 } from "./callEventTypes.ts";
 import { CallFeed } from "./callFeed.ts";
-import { MatrixClient } from "../client.ts";
+import { type MatrixClient } from "../client.ts";
 import { EventEmitterEvents, TypedEventEmitter } from "../models/typed-event-emitter.ts";
-import { DeviceInfo } from "../crypto/deviceinfo.ts";
 import { GroupCallUnknownDeviceError } from "./groupCall.ts";
-import { IScreensharingOpts } from "./mediaHandler.ts";
+import { type IScreensharingOpts } from "./mediaHandler.ts";
 import { MatrixError } from "../http-api/index.ts";
-import { GroupCallStats } from "./stats/groupCallStats.ts";
+import { type GroupCallStats } from "./stats/groupCallStats.ts";
 
 interface CallOpts {
     // The room ID for this call.
@@ -277,7 +275,7 @@ export class CallError extends Error {
 }
 
 export function genCallID(): string {
-    return Date.now().toString() + randomString(16);
+    return Date.now().toString() + secureRandomString(16);
 }
 
 function getCodecParamMods(isPtt: boolean): CodecParamsMod[] {
@@ -302,7 +300,7 @@ type CallEventType =
     | EventType.CallCandidates
     | EventType.CallHangup
     | EventType.CallReject
-    | EventType.CallSDPStreamMetadataChangedPrefix;
+    | EventType.CallSDPStreamMetadataChanged;
 
 export interface VoipEvent {
     type: "toDevice" | "sendEvent";
@@ -426,7 +424,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
     private callStartTime?: number;
 
     private opponentDeviceId?: string;
-    private opponentDeviceInfo?: DeviceInfo;
+    private hasOpponentDeviceInfo?: boolean;
     private opponentSessionId?: string;
     public groupCallId?: string;
 
@@ -631,23 +629,18 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
         if (!this.client.getUseE2eForGroupCall()) return;
         // It's possible to want E2EE and yet not have the means to manage E2EE
         // ourselves (for example if the client is a RoomWidgetClient)
-        if (!this.client.isCryptoEnabled()) {
+        if (!this.client.getCrypto()) {
             // All we know is the device ID
-            this.opponentDeviceInfo = new DeviceInfo(this.opponentDeviceId);
+            this.hasOpponentDeviceInfo = true;
             return;
         }
-        // if we've got to this point, we do want to init crypto, so throw if we can't
-        if (!this.client.crypto) throw new Error("Crypto is not initialised.");
-
         const userId = this.invitee || this.getOpponentMember()?.userId;
 
         if (!userId) throw new Error("Couldn't find opponent user ID to init crypto");
 
-        const deviceInfoMap = await this.client.crypto.deviceList.downloadKeys([userId], false);
-        this.opponentDeviceInfo = deviceInfoMap.get(userId)?.get(this.opponentDeviceId);
-        if (this.opponentDeviceInfo === undefined) {
-            throw new GroupCallUnknownDeviceError(userId);
-        }
+        // Here we were calling `MatrixClient.crypto.deviceList.downloadKeys` which is not supported by the rust cryptography.
+        this.hasOpponentDeviceInfo = false;
+        throw new GroupCallUnknownDeviceError(userId);
     }
 
     /**
@@ -960,7 +953,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
             );
         }
 
-        const sdpStreamMetadata = invite[SDPStreamMetadataKey];
+        const sdpStreamMetadata = SDPStreamMetadataKey.findIn(invite);
         if (sdpStreamMetadata) {
             this.updateRemoteSDPStreamMetadata(sdpStreamMetadata);
         } else {
@@ -1061,9 +1054,9 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
             logger.warn(
                 `Call ${this.callId} shouldAnswerWithMediaType() unable to answer with ${type}=${wantedValue} because the other side doesn't support it. Answering with ${type}=${valueOfTheOtherSide}.`,
             );
-            return valueOfTheOtherSide!;
+            return valueOfTheOtherSide;
         }
-        return wantedValue ?? valueOfTheOtherSide!;
+        return wantedValue ?? valueOfTheOtherSide;
     }
 
     /**
@@ -1602,8 +1595,8 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
     }
 
     public async sendMetadataUpdate(): Promise<void> {
-        await this.sendVoipEvent(EventType.CallSDPStreamMetadataChangedPrefix, {
-            [SDPStreamMetadataKey]: this.getLocalSDPStreamMetadata(),
+        await this.sendVoipEvent(EventType.CallSDPStreamMetadataChanged, {
+            [SDPStreamMetadataKey.name]: this.getLocalSDPStreamMetadata(),
         });
     }
 
@@ -1634,15 +1627,15 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
     }
 
     private async sendAnswer(): Promise<void> {
-        const answerContent = {
+        const answerContent: Omit<MCallAnswer, "version" | "call_id" | "party_id" | "conf_id"> = {
             answer: {
                 sdp: this.peerConn!.localDescription!.sdp,
                 // type is now deprecated as of Matrix VoIP v1, but
                 // required to still be sent for backwards compat
                 type: this.peerConn!.localDescription!.type,
             },
-            [SDPStreamMetadataKey]: this.getLocalSDPStreamMetadata(true),
-        } as MCallAnswer;
+            [SDPStreamMetadataKey.name]: this.getLocalSDPStreamMetadata(true),
+        };
 
         answerContent.capabilities = {
             "m.call.transferee": this.client.supportsCallTransfer,
@@ -1900,7 +1893,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
 
         this.state = CallState.Connecting;
 
-        const sdpStreamMetadata = content[SDPStreamMetadataKey];
+        const sdpStreamMetadata = SDPStreamMetadataKey.findIn(content);
         if (sdpStreamMetadata) {
             this.updateRemoteSDPStreamMetadata(sdpStreamMetadata);
         } else {
@@ -1992,7 +1985,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
 
         const prevLocalOnHold = this.isLocalOnHold();
 
-        const sdpStreamMetadata = content[SDPStreamMetadataKey];
+        const sdpStreamMetadata = SDPStreamMetadataKey.findIn<SDPStreamMetadata>(content);
         if (sdpStreamMetadata) {
             this.updateRemoteSDPStreamMetadata(sdpStreamMetadata);
         } else {
@@ -2025,7 +2018,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
                 this.sendVoipEvent(EventType.CallNegotiate, {
                     lifetime: CALL_TIMEOUT_MS,
                     description: this.peerConn!.localDescription?.toJSON() as RTCSessionDescription,
-                    [SDPStreamMetadataKey]: this.getLocalSDPStreamMetadata(true),
+                    [SDPStreamMetadataKey.name]: this.getLocalSDPStreamMetadata(true),
                 });
             }
         } catch (err) {
@@ -2045,17 +2038,19 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
         this.remoteSDPStreamMetadata = recursivelyAssign(this.remoteSDPStreamMetadata || {}, metadata, true);
         for (const feed of this.getRemoteFeeds()) {
             const streamId = feed.stream.id;
-            const metadata = this.remoteSDPStreamMetadata![streamId];
+            const metadata = this.remoteSDPStreamMetadata[streamId];
 
             feed.setAudioVideoMuted(metadata?.audio_muted, metadata?.video_muted);
-            feed.purpose = this.remoteSDPStreamMetadata![streamId]?.purpose;
+            feed.purpose = this.remoteSDPStreamMetadata[streamId]?.purpose;
         }
     }
 
     public onSDPStreamMetadataChangedReceived(event: MatrixEvent): void {
         const content = event.getContent<MCallSDPStreamMetadataChanged>();
-        const metadata = content[SDPStreamMetadataKey];
-        this.updateRemoteSDPStreamMetadata(metadata);
+        const metadata = SDPStreamMetadataKey.findIn<SDPStreamMetadata>(content);
+        if (metadata) {
+            this.updateRemoteSDPStreamMetadata(metadata);
+        }
     }
 
     public async onAssertedIdentityReceived(event: MatrixEvent): Promise<void> {
@@ -2162,7 +2157,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
             "m.call.dtmf": false,
         };
 
-        content[SDPStreamMetadataKey] = this.getLocalSDPStreamMetadata(true);
+        content[SDPStreamMetadataKey.name] = this.getLocalSDPStreamMetadata(true);
 
         // Get rid of any candidates waiting to be sent: they'll be included in the local
         // description we just got and will send in the offer.
@@ -2291,7 +2286,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
                 logger.debug(
                     `Call ${this.callId} onIceConnectionStateChanged() ice restart (state=${this.peerConn?.iceConnectionState})`,
                 );
-                this.peerConn!.restartIce();
+                this.peerConn.restartIce();
             } else {
                 logger.info(
                     `Call ${this.callId} onIceConnectionStateChanged() hanging up call (ICE failed and no ICE restart method)`,
@@ -2494,7 +2489,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
                 sender_session_id: this.client.getSessionId(),
                 dest_session_id: this.opponentSessionId,
                 seq: toDeviceSeq,
-                [ToDeviceMessageId]: uuidv4(),
+                [ToDeviceMessageId]: globalThis.crypto.randomUUID(),
             };
 
             this.emit(
@@ -2511,23 +2506,14 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
 
             const userId = this.invitee || this.getOpponentMember()!.userId;
             if (this.client.getUseE2eForGroupCall()) {
-                if (!this.opponentDeviceInfo) {
+                if (!this.hasOpponentDeviceInfo) {
                     logger.warn(`Call ${this.callId} sendVoipEvent() failed: we do not have opponentDeviceInfo`);
                     return;
                 }
 
-                await this.client.encryptAndSendToDevices(
-                    [
-                        {
-                            userId,
-                            deviceInfo: this.opponentDeviceInfo,
-                        },
-                    ],
-                    {
-                        type: eventType,
-                        content,
-                    },
-                );
+                // TODO: Here we were sending the event to the opponent's device as a to-device message with MatrixClient.encryptAndSendToDevice.
+                // However due to the switch to Rust cryptography we need to migrate to the new encryptToDeviceMessages API.
+                throw new Error("Unimplemented");
             } else {
                 await this.client.sendToDevice(
                     eventType,
@@ -2547,7 +2533,7 @@ export class MatrixCall extends TypedEventEmitter<CallEvent, CallEventHandlerMap
                 this,
             );
 
-            await this.client.sendEvent(this.roomId!, eventType, realContent);
+            await this.client.sendEvent(this.roomId, eventType, realContent);
         }
     }
 
@@ -3017,9 +3003,9 @@ export function supportsMatrixCall(): boolean {
     try {
         const supported = Boolean(
             window.RTCPeerConnection ??
-                window.RTCSessionDescription ??
-                window.RTCIceCandidate ??
-                navigator.mediaDevices,
+            window.RTCSessionDescription ??
+            window.RTCIceCandidate ??
+            navigator.mediaDevices,
         );
         if (!supported) {
             /* istanbul ignore if */ // Adds a lot of noise to test runs, so disable logging there.

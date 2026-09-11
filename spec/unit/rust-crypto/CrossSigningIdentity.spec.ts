@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { Mocked } from "jest-mock";
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type Mocked } from "vitest";
 
 import { CrossSigningIdentity } from "../../../src/rust-crypto/CrossSigningIdentity";
-import { OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
-import { ServerSideSecretStorage } from "../../../src/secret-storage";
+import { type OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
+import { type ServerSideSecretStorage } from "../../../src/secret-storage";
+import { logger } from "../../../src/logger.ts";
 
 describe("CrossSigningIdentity", () => {
     describe("bootstrapCrossSigning", () => {
@@ -39,23 +40,23 @@ describe("CrossSigningIdentity", () => {
             await RustSdkCryptoJs.initAsync();
 
             olmMachine = {
-                crossSigningStatus: jest.fn(),
-                bootstrapCrossSigning: jest.fn(),
-                exportCrossSigningKeys: jest.fn(),
-                close: jest.fn(),
+                crossSigningStatus: vi.fn(),
+                bootstrapCrossSigning: vi.fn(),
+                exportCrossSigningKeys: vi.fn(),
+                close: vi.fn(),
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
 
             outgoingRequestProcessor = {
-                makeOutgoingRequest: jest.fn(),
+                makeOutgoingRequest: vi.fn(),
             } as unknown as Mocked<OutgoingRequestProcessor>;
 
             secretStorage = {
-                get: jest.fn(),
-                hasKey: jest.fn(),
-                store: jest.fn(),
+                get: vi.fn(),
+                hasKey: vi.fn(),
+                store: vi.fn(),
             } as unknown as Mocked<ServerSideSecretStorage>;
 
-            crossSigning = new CrossSigningIdentity(olmMachine, outgoingRequestProcessor, secretStorage);
+            crossSigning = new CrossSigningIdentity(logger, olmMachine, outgoingRequestProcessor, secretStorage);
         });
 
         it("should do nothing if keys are present on-device and in secret storage", async () => {
@@ -63,7 +64,7 @@ describe("CrossSigningIdentity", () => {
                 hasMaster: true,
                 hasSelfSigning: true,
                 hasUserSigning: true,
-            });
+            } as unknown as RustSdkCryptoJs.CrossSigningStatus);
             // in secret storage
             secretStorage.get.mockResolvedValue("base64-saved-in-storage");
             await crossSigning.bootstrapCrossSigning({});
@@ -72,19 +73,23 @@ describe("CrossSigningIdentity", () => {
         });
 
         it("should call bootstrapCrossSigning if a reset is forced", async () => {
-            olmMachine.bootstrapCrossSigning.mockResolvedValue([]);
+            olmMachine.bootstrapCrossSigning.mockResolvedValue(
+                [] as unknown as RustSdkCryptoJs.CrossSigningBootstrapRequests,
+            );
             await crossSigning.bootstrapCrossSigning({ setupNewCrossSigning: true });
             expect(olmMachine.bootstrapCrossSigning).toHaveBeenCalledWith(true);
         });
 
         it("Shoud update 4S on reset if 4S is set up", async () => {
-            olmMachine.bootstrapCrossSigning.mockResolvedValue([]);
+            olmMachine.bootstrapCrossSigning.mockResolvedValue(
+                [] as unknown as RustSdkCryptoJs.CrossSigningBootstrapRequests,
+            );
             secretStorage.hasKey.mockResolvedValue(true);
             olmMachine.exportCrossSigningKeys.mockResolvedValue({
                 masterKey: "base64_aaaaaaaaaa",
                 self_signing_key: "base64_bbbbbbbbbbb",
                 userSigningKey: "base64_cccccccc",
-            });
+            } as unknown as RustSdkCryptoJs.CrossSigningKeyExport);
             await crossSigning.bootstrapCrossSigning({ setupNewCrossSigning: true });
             expect(olmMachine.bootstrapCrossSigning).toHaveBeenCalledWith(true);
             expect(secretStorage.store).toHaveBeenCalledTimes(3);
@@ -95,8 +100,10 @@ describe("CrossSigningIdentity", () => {
                 hasMaster: false,
                 hasSelfSigning: false,
                 hasUserSigning: false,
-            });
-            olmMachine.bootstrapCrossSigning.mockResolvedValue([]);
+            } as RustSdkCryptoJs.CrossSigningStatus);
+            olmMachine.bootstrapCrossSigning.mockResolvedValue(
+                [] as unknown as RustSdkCryptoJs.CrossSigningBootstrapRequests,
+            );
             await crossSigning.bootstrapCrossSigning({});
             expect(olmMachine.bootstrapCrossSigning).toHaveBeenCalledWith(true);
         });

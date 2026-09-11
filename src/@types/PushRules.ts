@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// allow camelcase as these are things that go onto the wire
-/* eslint-disable camelcase */
-
 export enum PushRuleActionName {
     DontNotify = "dont_notify",
     Notify = "notify",
@@ -102,8 +99,7 @@ export interface IRoomMemberCountCondition extends IPushRuleCondition<ConditionK
     is: AnyMemberCountCondition;
 }
 
-export interface ISenderNotificationPermissionCondition
-    extends IPushRuleCondition<ConditionKind.SenderNotificationPermission> {
+export interface ISenderNotificationPermissionCondition extends IPushRuleCondition<ConditionKind.SenderNotificationPermission> {
     key: string;
 }
 
@@ -205,5 +201,3 @@ export interface IPusher {
 export interface IPusherRequest extends Omit<IPusher, "device_id" | "org.matrix.msc3881.device_id"> {
     append?: boolean;
 }
-
-/* eslint-enable camelcase */

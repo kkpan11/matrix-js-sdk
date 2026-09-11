@@ -14,12 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { mocked } from "jest-mock";
+import { type Mock } from "vitest";
 
-import { EventType, GroupCallIntent, GroupCallType, MatrixCall, MatrixEvent, Room, RoomMember } from "../../../src";
+import {
+    EventType,
+    GroupCallIntent,
+    GroupCallType,
+    type MatrixCall,
+    MatrixEvent,
+    Room,
+    type RoomMember,
+    type StateEvents,
+} from "../../../src";
 import { RoomStateEvent } from "../../../src/models/room-state";
 import { GroupCall, GroupCallEvent, GroupCallState, GroupCallStatsReportEvent } from "../../../src/webrtc/groupCall";
-import { IMyDevice, MatrixClient } from "../../../src/client";
+import { type IMyDevice, MatrixClient } from "../../../src/client";
 import {
     FAKE_CONF_ID,
     FAKE_DEVICE_ID_1,
@@ -44,9 +53,9 @@ import { CallEventHandlerEvent } from "../../../src/webrtc/callEventHandler";
 import { CallFeed } from "../../../src/webrtc/callFeed";
 import { CallEvent, CallState } from "../../../src/webrtc/call";
 import { flushPromises } from "../../test-utils/flushPromises";
-import { CallFeedReport } from "../../../src/webrtc/stats/statsReport";
+import { type CallFeedReport } from "../../../src/webrtc/stats/statsReport";
 import { CallFeedStatsReporter } from "../../../src/webrtc/stats/callFeedStatsReporter";
-import { StatsReportEmitter } from "../../../src/webrtc/stats/statsReportEmitter";
+import { type StatsReportEmitter } from "../../../src/webrtc/stats/statsReportEmitter";
 import { KnownMembership } from "../../../src/@types/membership";
 
 const FAKE_STATE_EVENTS = [
@@ -129,7 +138,7 @@ describe("Group Call", function () {
     });
 
     describe("Basic functionality", function () {
-        let mockSendState: jest.Mock;
+        let mockSendState: Mock;
         let mockClient: MatrixClient;
         let room: Room;
         let groupCall: GroupCall;
@@ -162,7 +171,7 @@ describe("Group Call", function () {
         );
 
         it.each([0, 3, 5, 10, 5000])("sets correct creation timestamp when creating a call", async (time: number) => {
-            jest.spyOn(Date, "now").mockReturnValue(time);
+            vi.spyOn(Date, "now").mockReturnValue(time);
             await groupCall.create();
 
             expect(groupCall.creationTs).toBe(time);
@@ -170,7 +179,7 @@ describe("Group Call", function () {
 
         it("does not initialize local call feed, if it already is", async () => {
             await groupCall.initLocalCallFeed();
-            jest.spyOn(groupCall, "initLocalCallFeed");
+            vi.spyOn(groupCall, "initLocalCallFeed");
             await groupCall.enter();
 
             expect(groupCall.initLocalCallFeed).not.toHaveBeenCalled();
@@ -179,16 +188,17 @@ describe("Group Call", function () {
         });
 
         it("does not start initializing local call feed twice", () => {
-            const promise1 = groupCall.initLocalCallFeed();
+            const spy = vi.spyOn(groupCall, "initLocalCallFeedInternal");
+            groupCall.initLocalCallFeed();
             // @ts-ignore Mock
             groupCall.state = GroupCallState.LocalCallFeedUninitialized;
-            const promise2 = groupCall.initLocalCallFeed();
+            groupCall.initLocalCallFeed();
 
-            expect(promise1).toEqual(promise2);
+            expect(spy).toHaveBeenCalledTimes(1);
         });
 
         it("sets state to local call feed uninitialized when getUserMedia() fails", async () => {
-            jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValue("Error");
+            vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValue("Error");
 
             await expect(groupCall.initLocalCallFeed()).rejects.toBeTruthy();
             expect(groupCall.state).toBe(GroupCallState.LocalCallFeedUninitialized);
@@ -350,8 +360,8 @@ describe("Group Call", function () {
             }
         });
 
-        it("does not throw when calling updateLocalUsermediaStream() without local usermedia stream", () => {
-            expect(async () => await groupCall.updateLocalUsermediaStream({} as MediaStream)).not.toThrow();
+        it("does not throw when calling updateLocalUsermediaStream() without local usermedia stream", async () => {
+            await expect(groupCall.updateLocalUsermediaStream({} as MediaStream)).resolves.toBeUndefined();
         });
 
         it.each([GroupCallState.Ended, GroupCallState.Entered, GroupCallState.InitializingLocalCallFeed])(
@@ -381,10 +391,11 @@ describe("Group Call", function () {
             const newFeed = new MockCallFeed(FAKE_USER_ID_1, FAKE_DEVICE_ID_1, new MockMediaStream("new"));
 
             beforeEach(async () => {
-                jest.spyOn(currentFeed, "dispose");
-                jest.spyOn(newFeed, "measureVolumeActivity");
+                vi.clearAllMocks();
+                vi.spyOn(currentFeed, "dispose");
+                vi.spyOn(newFeed, "measureVolumeActivity");
 
-                jest.spyOn(groupCall, "emit");
+                vi.spyOn(groupCall, "emit");
 
                 call = new MockMatrixCall(room.roomId, groupCall.groupCallId);
 
@@ -397,7 +408,7 @@ describe("Group Call", function () {
 
             it("ignores changes, if we can't get user id of opponent", async () => {
                 const call = new MockMatrixCall(room.roomId, groupCall.groupCallId);
-                jest.spyOn(call, "getOpponentMember").mockReturnValue({ userId: undefined });
+                vi.spyOn(call, "getOpponentMember").mockReturnValue({ userId: undefined });
 
                 // @ts-ignore Mock
                 expect(() => groupCall.onCallFeedsChanged(call)).toThrow();
@@ -486,7 +497,6 @@ describe("Group Call", function () {
 
                     expect(groupCall.screenshareFeeds).toStrictEqual(newFeeds);
                     expect(currentFeed.dispose).toHaveBeenCalled();
-                    expect(newFeed.measureVolumeActivity).toHaveBeenCalledWith(true);
                     expect(groupCall.emit).toHaveBeenCalledWith(GroupCallEvent.ScreenshareFeedsChanged, newFeeds);
                 });
             });
@@ -503,7 +513,7 @@ describe("Group Call", function () {
             });
 
             afterEach(() => {
-                jest.useRealTimers();
+                vi.useRealTimers();
 
                 groupCall.leave();
             });
@@ -513,30 +523,30 @@ describe("Group Call", function () {
             });
 
             it("re-mutes microphone after transmit timeout in PTT mode", async () => {
-                jest.useFakeTimers();
+                vi.useFakeTimers();
 
                 await groupCall.setMicrophoneMuted(false);
                 expect(groupCall.isMicrophoneMuted()).toEqual(false);
 
-                await jest.advanceTimersByTimeAsync(groupCall.pttMaxTransmitTime + 100);
+                await vi.advanceTimersByTimeAsync(groupCall.pttMaxTransmitTime + 100);
                 expect(groupCall.isMicrophoneMuted()).toEqual(true);
             });
 
             it("timer is cleared when mic muted again in PTT mode", async () => {
-                jest.useFakeTimers();
+                vi.useFakeTimers();
 
                 await groupCall.setMicrophoneMuted(false);
                 expect(groupCall.isMicrophoneMuted()).toEqual(false);
 
                 // 'talk' for half the allowed time
-                jest.advanceTimersByTime(groupCall.pttMaxTransmitTime / 2);
+                vi.advanceTimersByTime(groupCall.pttMaxTransmitTime / 2);
 
                 await groupCall.setMicrophoneMuted(true);
                 await groupCall.setMicrophoneMuted(false);
 
                 // we should still be unmuted after almost the full timeout duration
                 // if not, the timer for the original talking session must have fired
-                jest.advanceTimersByTime(groupCall.pttMaxTransmitTime - 100);
+                vi.advanceTimersByTime(groupCall.pttMaxTransmitTime - 100);
 
                 expect(groupCall.isMicrophoneMuted()).toEqual(false);
             });
@@ -553,7 +563,7 @@ describe("Group Call", function () {
                 const metadataUpdatePromise = new Promise<void>((resolve) => {
                     metadataUpdateResolve = resolve;
                 });
-                mockCall.sendMetadataUpdate = jest.fn().mockReturnValue(metadataUpdatePromise);
+                mockCall.sendMetadataUpdate = vi.fn().mockReturnValue(metadataUpdatePromise);
 
                 const mutePromise = groupCall.setMicrophoneMuted(false);
                 // we should still be muted at this point because the metadata update hasn't sent
@@ -577,19 +587,19 @@ describe("Group Call", function () {
 
                 // the call starts muted, so unmute to get in the right state to test
                 await groupCall.setMicrophoneMuted(false);
-                mocked(mockCall.localUsermediaFeed.setAudioVideoMuted).mockReset();
+                vi.mocked(mockCall.localUsermediaFeed.setAudioVideoMuted).mockReset();
 
                 let metadataUpdateResolve: () => void;
                 const metadataUpdatePromise = new Promise<void>((resolve) => {
                     metadataUpdateResolve = resolve;
                 });
-                mockCall.sendMetadataUpdate = jest.fn().mockReturnValue(metadataUpdatePromise);
+                mockCall.sendMetadataUpdate = vi.fn().mockReturnValue(metadataUpdatePromise);
 
                 const getUserMediaStreamFlush = Promise.resolve("stream");
                 // @ts-ignore
                 mockCall.cleint = {
                     getMediaHandler: {
-                        getUserMediaStream: jest.fn().mockReturnValue(getUserMediaStreamFlush),
+                        getUserMediaStream: vi.fn().mockReturnValue(getUserMediaStreamFlush),
                     },
                 };
                 const mutePromise = groupCall.setMicrophoneMuted(true);
@@ -620,7 +630,12 @@ describe("Group Call", function () {
             client2 = new MockCallMatrixClient(FAKE_USER_ID_2, FAKE_DEVICE_ID_2, FAKE_SESSION_ID_2);
 
             // Inject the state events directly into each client when sent
-            const fakeSendStateEvents = (roomId: string, eventType: EventType, content: any, statekey: string) => {
+            const fakeSendStateEvents = (
+                roomId: string,
+                eventType: keyof StateEvents,
+                content: any,
+                statekey: string = "",
+            ) => {
                 if (eventType === EventType.GroupCallMemberPrefix) {
                     const fakeEvent = {
                         getContent: () => content,
@@ -681,7 +696,7 @@ describe("Group Call", function () {
         afterEach(function () {
             groupCall1.leave();
             groupCall2.leave();
-            jest.useRealTimers();
+            vi.useRealTimers();
 
             MockRTCPeerConnection.resetInstances();
         });
@@ -716,12 +731,13 @@ describe("Group Call", function () {
                 const bobDeviceMessage = toDeviceBobDevices?.get(FAKE_DEVICE_ID_2);
                 expect(bobDeviceMessage?.conf_id).toBe(FAKE_CONF_ID);
             } finally {
-                await Promise.all([groupCall1.leave(), groupCall2.leave()]);
+                groupCall1.leave();
+                groupCall2.leave();
             }
         });
 
         it("Retries calls", async function () {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
             await groupCall1.create();
 
             try {
@@ -742,7 +758,7 @@ describe("Group Call", function () {
 
                 // @ts-ignore
                 const oldCall = groupCall1.calls.get(client2.userId)!.get(client2.deviceId)!;
-                oldCall.emit(CallEvent.Hangup, oldCall!);
+                oldCall.emit(CallEvent.Hangup, oldCall);
 
                 client1.sendToDevice.mockClear();
 
@@ -753,7 +769,7 @@ describe("Group Call", function () {
                     });
                 });
 
-                jest.advanceTimersByTime(groupCall1.retryCallInterval + 500);
+                vi.advanceTimersByTime(groupCall1.retryCallInterval + 500);
 
                 // when we placed the call, we could await on enter which waited for the call to
                 // be made. We don't have that luxury now, so first have to wait for the call
@@ -779,7 +795,8 @@ describe("Group Call", function () {
 
                 expect(client1.sendToDevice).toHaveBeenCalledWith(EventType.CallInvite, expect.objectContaining({}));
             } finally {
-                await Promise.all([groupCall1.leave(), groupCall2.leave()]);
+                groupCall1.leave();
+                groupCall2.leave();
             }
         });
 
@@ -805,17 +822,18 @@ describe("Group Call", function () {
 
                 // @ts-ignore
                 const call = groupCall1.calls.get(client2.userId)!.get(client2.deviceId)!;
-                call.isMicrophoneMuted = jest.fn().mockReturnValue(true);
-                call.setMicrophoneMuted = jest.fn();
-                call.isLocalVideoMuted = jest.fn().mockReturnValue(true);
-                call.setLocalVideoMuted = jest.fn();
+                call.isMicrophoneMuted = vi.fn().mockReturnValue(true);
+                call.setMicrophoneMuted = vi.fn();
+                call.isLocalVideoMuted = vi.fn().mockReturnValue(true);
+                call.setLocalVideoMuted = vi.fn();
 
                 call.emit(CallEvent.State, CallState.Connected, CallState.InviteSent, call);
 
                 expect(call.setMicrophoneMuted).toHaveBeenCalledWith(false);
                 expect(call.setLocalVideoMuted).toHaveBeenCalledWith(false);
             } finally {
-                await Promise.all([groupCall1.leave(), groupCall2.leave()]);
+                groupCall1.leave();
+                groupCall2.leave();
             }
         });
     });
@@ -829,7 +847,7 @@ describe("Group Call", function () {
             mockClient = typedMockClient as unknown as MatrixClient;
 
             room = new Room(FAKE_ROOM_ID, mockClient, FAKE_USER_ID_1);
-            room.currentState.getStateEvents = jest.fn().mockImplementation(mockGetStateEvents());
+            room.currentState.getStateEvents = vi.fn().mockImplementation(mockGetStateEvents());
             room.currentState.members[FAKE_USER_ID_1] = {
                 userId: FAKE_USER_ID_1,
                 membership: KnownMembership.Join,
@@ -844,14 +862,14 @@ describe("Group Call", function () {
             it("should mute local audio when calling setMicrophoneMuted()", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
 
-                groupCall.localCallFeed!.setAudioVideoMuted = jest.fn();
+                groupCall.localCallFeed!.setAudioVideoMuted = vi.fn();
                 const setAVMutedArray: ((audioMuted: boolean | null, videoMuted: boolean | null) => void)[] = [];
                 const tracksArray: MediaStreamTrack[] = [];
                 const sendMetadataUpdateArray: (() => Promise<void>)[] = [];
                 groupCall.forEachCall((call) => {
-                    setAVMutedArray.push((call.localUsermediaFeed!.setAudioVideoMuted = jest.fn()));
+                    setAVMutedArray.push((call.localUsermediaFeed!.setAudioVideoMuted = vi.fn()));
                     tracksArray.push(...call.localUsermediaStream!.getAudioTracks());
-                    sendMetadataUpdateArray.push((call.sendMetadataUpdate = jest.fn()));
+                    sendMetadataUpdateArray.push((call.sendMetadataUpdate = vi.fn()));
                 });
 
                 await groupCall.setMicrophoneMuted(true);
@@ -868,18 +886,18 @@ describe("Group Call", function () {
             it("should mute local video when calling setLocalVideoMuted()", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
 
-                jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream");
-                jest.spyOn(groupCall, "updateLocalUsermediaStream");
-                jest.spyOn(groupCall.localCallFeed!, "setAudioVideoMuted");
+                vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream");
+                vi.spyOn(groupCall, "updateLocalUsermediaStream");
+                vi.spyOn(groupCall.localCallFeed!, "setAudioVideoMuted");
 
                 const setAVMutedArray: ((audioMuted: boolean | null, videoMuted: boolean | null) => void)[] = [];
                 const tracksArray: MediaStreamTrack[] = [];
                 const sendMetadataUpdateArray: (() => Promise<void>)[] = [];
                 groupCall.forEachCall((call) => {
-                    call.localUsermediaFeed!.isVideoMuted = jest.fn().mockReturnValue(true);
-                    setAVMutedArray.push((call.localUsermediaFeed!.setAudioVideoMuted = jest.fn()));
+                    call.localUsermediaFeed!.isVideoMuted = vi.fn().mockReturnValue(true);
+                    setAVMutedArray.push((call.localUsermediaFeed!.setAudioVideoMuted = vi.fn()));
                     tracksArray.push(...call.localUsermediaStream!.getVideoTracks());
-                    sendMetadataUpdateArray.push((call.sendMetadataUpdate = jest.fn()));
+                    sendMetadataUpdateArray.push((call.sendMetadataUpdate = vi.fn()));
                 });
 
                 await groupCall.setLocalVideoMuted(true);
@@ -896,15 +914,15 @@ describe("Group Call", function () {
 
             it("returns false when unmuting audio with no audio device", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
-                jest.spyOn(mockClient.getMediaHandler(), "hasAudioDevice").mockResolvedValue(false);
+                vi.spyOn(mockClient.getMediaHandler(), "hasAudioDevice").mockResolvedValue(false);
                 expect(await groupCall.setMicrophoneMuted(false)).toBe(false);
             });
 
             it("returns false when no permission for audio stream and localCallFeed do not have an audio track", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
                 // @ts-ignore
-                jest.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(false);
-                jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValueOnce(
+                vi.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(false);
+                vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValueOnce(
                     new Error("No Permission"),
                 );
                 expect(await groupCall.setMicrophoneMuted(false)).toBe(false);
@@ -913,30 +931,30 @@ describe("Group Call", function () {
             it("returns false when user media stream null", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
                 // @ts-ignore
-                jest.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(false);
+                vi.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(false);
                 // @ts-ignore
-                jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockResolvedValue({} as MediaStream);
+                vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockResolvedValue({} as MediaStream);
                 expect(await groupCall.setMicrophoneMuted(false)).toBe(false);
             });
 
             it("returns true when no permission for audio stream but localCallFeed has a audio track already", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
                 // @ts-ignore
-                jest.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(true);
-                jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream");
+                vi.spyOn(groupCall.localCallFeed, "hasAudioTrack", "get").mockReturnValue(true);
+                vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream");
                 expect(mockClient.getMediaHandler().getUserMediaStream).not.toHaveBeenCalled();
                 expect(await groupCall.setMicrophoneMuted(false)).toBe(true);
             });
 
             it("returns false when unmuting video with no video device", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
-                jest.spyOn(mockClient.getMediaHandler(), "hasVideoDevice").mockResolvedValue(false);
+                vi.spyOn(mockClient.getMediaHandler(), "hasVideoDevice").mockResolvedValue(false);
                 expect(await groupCall.setLocalVideoMuted(false)).toBe(false);
             });
 
             it("returns false when no permission for video stream", async () => {
                 const groupCall = await createAndEnterGroupCall(mockClient, room);
-                jest.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValueOnce(
+                vi.spyOn(mockClient.getMediaHandler(), "getUserMediaStream").mockRejectedValueOnce(
                     new Error("No Permission"),
                 );
                 expect(await groupCall.setLocalVideoMuted(false)).toBe(false);
@@ -947,7 +965,7 @@ describe("Group Call", function () {
             const getMetadataEvent = (audio: boolean, video: boolean): MatrixEvent =>
                 ({
                     getContent: () => ({
-                        [SDPStreamMetadataKey]: {
+                        [SDPStreamMetadataKey.name]: {
                             stream: {
                                 purpose: SDPStreamMetadataPurpose.Usermedia,
                                 audio_muted: audio,
@@ -1106,7 +1124,7 @@ describe("Group Call", function () {
         });
 
         const aliceEnters = () => {
-            room.currentState.getStateEvents = jest.fn().mockImplementation(
+            room.currentState.getStateEvents = vi.fn().mockImplementation(
                 mockGetStateEvents([
                     {
                         getContent: () => ({
@@ -1134,9 +1152,7 @@ describe("Group Call", function () {
         };
 
         const aliceLeaves = () => {
-            room.currentState.getStateEvents = jest
-                .fn()
-                .mockImplementation(mockGetStateEvents([] as unknown as MatrixEvent[]));
+            room.currentState.getStateEvents = vi.fn().mockImplementation(mockGetStateEvents([]));
             room.currentState.emit(RoomStateEvent.Update, room.currentState);
         };
 
@@ -1171,13 +1187,13 @@ describe("Group Call", function () {
         });
 
         describe("handles call being replaced", () => {
-            let callChangedListener: jest.Mock;
+            let callChangedListener: Mock;
             let oldMockCall: MockMatrixCall;
             let newMockCall: MockMatrixCall;
             let newCallsMap: Map<string, Map<string, MatrixCall>>;
 
             beforeEach(() => {
-                callChangedListener = jest.fn();
+                callChangedListener = vi.fn();
                 groupCall.addListener(GroupCallEvent.CallsChanged, callChangedListener);
 
                 oldMockCall = new MockMatrixCall(room.roomId, groupCall.groupCallId);
@@ -1211,11 +1227,11 @@ describe("Group Call", function () {
         });
 
         describe("handles call being hangup", () => {
-            let callChangedListener: jest.Mock;
+            let callChangedListener: Mock;
             let mockCall: MockMatrixCall;
 
             beforeEach(() => {
-                callChangedListener = jest.fn();
+                callChangedListener = vi.fn();
                 groupCall.addListener(GroupCallEvent.CallsChanged, callChangedListener);
                 mockCall = new MockMatrixCall(room.roomId, groupCall.groupCallId);
             });
@@ -1267,7 +1283,7 @@ describe("Group Call", function () {
                 userId: FAKE_USER_ID_2,
                 membership: KnownMembership.Join,
             } as unknown as RoomMember;
-            room.currentState.getStateEvents = jest.fn().mockImplementation(mockGetStateEvents());
+            room.currentState.getStateEvents = vi.fn().mockImplementation(mockGetStateEvents());
 
             groupCall = await createAndEnterGroupCall(mockClient, room);
         });
@@ -1276,7 +1292,7 @@ describe("Group Call", function () {
             const onNegotiationNeededArray: (() => Promise<void>)[] = [];
             groupCall.forEachCall((call) => {
                 // @ts-ignore Mock
-                onNegotiationNeededArray.push((call.gotLocalOffer = jest.fn()));
+                onNegotiationNeededArray.push((call.gotLocalOffer = vi.fn()));
             });
 
             let enabledResult: boolean;
@@ -1314,7 +1330,7 @@ describe("Group Call", function () {
             call.getOpponentMember = () => ({ userId: call.invitee }) as RoomMember;
             call.onNegotiateReceived({
                 getContent: () => ({
-                    [SDPStreamMetadataKey]: {
+                    [SDPStreamMetadataKey.name]: {
                         screensharing_stream: {
                             purpose: SDPStreamMetadataPurpose.Screenshare,
                         },
@@ -1339,8 +1355,8 @@ describe("Group Call", function () {
 
         it("cleans up screensharing when terminating", async () => {
             // @ts-ignore Mock
-            jest.spyOn(groupCall, "removeScreenshareFeed");
-            jest.spyOn(mockClient.getMediaHandler(), "stopScreensharingStream");
+            vi.spyOn(groupCall, "removeScreenshareFeed");
+            vi.spyOn(mockClient.getMediaHandler(), "stopScreensharingStream");
 
             await groupCall.setScreensharingEnabled(true);
 
@@ -1348,7 +1364,7 @@ describe("Group Call", function () {
 
             groupCall.terminate();
 
-            expect(mockClient.getMediaHandler()!.stopScreensharingStream).toHaveBeenCalledWith(
+            expect(mockClient.getMediaHandler().stopScreensharingStream).toHaveBeenCalledWith(
                 screensharingFeed!.stream,
             );
             // @ts-ignore Mock
@@ -1362,10 +1378,10 @@ describe("Group Call", function () {
         let groupCall: GroupCall;
         let mediaFeed1: CallFeed;
         let mediaFeed2: CallFeed;
-        let onActiveSpeakerEvent: jest.Mock<void, []>;
+        let onActiveSpeakerEvent: Mock<() => void>;
 
         beforeEach(async () => {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
 
             const mockClient = new MockCallMatrixClient(FAKE_USER_ID_1, FAKE_DEVICE_ID_1, FAKE_SESSION_ID_1);
 
@@ -1399,28 +1415,28 @@ describe("Group Call", function () {
             });
             groupCall.userMediaFeeds.push(mediaFeed2);
 
-            onActiveSpeakerEvent = jest.fn();
+            onActiveSpeakerEvent = vi.fn();
             groupCall.on(GroupCallEvent.ActiveSpeakerChanged, onActiveSpeakerEvent);
         });
 
         afterEach(() => {
             groupCall.off(GroupCallEvent.ActiveSpeakerChanged, onActiveSpeakerEvent);
 
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         it("fires active speaker events when a user is speaking", async () => {
             mediaFeed1.speakingVolumeSamples = [100, 100];
             mediaFeed2.speakingVolumeSamples = [0, 0];
 
-            jest.runOnlyPendingTimers();
+            vi.runOnlyPendingTimers();
             expect(groupCall.activeSpeaker).toEqual(mediaFeed1);
             expect(onActiveSpeakerEvent).toHaveBeenCalledWith(mediaFeed1);
 
             mediaFeed1.speakingVolumeSamples = [0, 0];
             mediaFeed2.speakingVolumeSamples = [100, 100];
 
-            jest.runOnlyPendingTimers();
+            vi.runOnlyPendingTimers();
             expect(groupCall.activeSpeaker).toEqual(mediaFeed2);
             expect(onActiveSpeakerEvent).toHaveBeenCalledWith(mediaFeed2);
         });
@@ -1432,7 +1448,7 @@ describe("Group Call", function () {
         beforeEach(() => {
             client = new MatrixClient({ baseUrl: "base_url", userId: "my_user_id" });
 
-            jest.spyOn(client, "sendStateEvent").mockResolvedValue({} as any);
+            vi.spyOn(client, "sendStateEvent").mockResolvedValue({} as any);
         });
 
         afterEach(() => {
@@ -1440,7 +1456,7 @@ describe("Group Call", function () {
         });
 
         it("throws when there already is a call", async () => {
-            jest.spyOn(client, "getRoom").mockReturnValue(new Room("room_id", client, "my_user_id"));
+            vi.spyOn(client, "getRoom").mockReturnValue(new Room("room_id", client, "my_user_id"));
 
             await client.createGroupCall("room_id", GroupCallType.Video, false, GroupCallIntent.Prompt);
 
@@ -1457,7 +1473,7 @@ describe("Group Call", function () {
 
         describe("correctly passes parameters", () => {
             beforeEach(() => {
-                jest.spyOn(client, "getRoom").mockReturnValue(new Room("room_id", client, "my_user_id"));
+                vi.spyOn(client, "getRoom").mockReturnValue(new Room("room_id", client, "my_user_id"));
             });
 
             it("correctly passes voice ptt room call", async () => {
@@ -1554,15 +1570,15 @@ describe("Group Call", function () {
         let groupCall: GroupCall;
 
         beforeAll(() => {
-            jest.useFakeTimers();
-            jest.setSystemTime(0);
+            vi.useFakeTimers();
+            vi.setSystemTime(0);
         });
 
-        afterAll(() => jest.useRealTimers());
+        afterAll(() => vi.useRealTimers());
 
         beforeEach(async () => {
             const typedMockClient = new MockCallMatrixClient(FAKE_USER_ID_2, bobWeb.device_id, FAKE_SESSION_ID_2);
-            jest.spyOn(typedMockClient, "sendStateEvent").mockImplementation(
+            vi.spyOn(typedMockClient, "sendStateEvent").mockImplementation(
                 async (roomId, eventType, content, stateKey) => {
                     const eventId = `$${Math.random()}`;
                     if (roomId === room.roomId) {
@@ -1586,7 +1602,7 @@ describe("Group Call", function () {
             mockClient = typedMockClient as unknown as MatrixClient;
 
             room = new Room(FAKE_ROOM_ID, mockClient, FAKE_USER_ID_2);
-            room.getMember = jest.fn().mockImplementation((userId) => ({ userId }));
+            room.getMember = vi.fn().mockImplementation((userId) => ({ userId }));
 
             groupCall = new GroupCall(
                 mockClient,
@@ -1665,11 +1681,11 @@ describe("Group Call", function () {
         let groupCall: GroupCall;
 
         beforeAll(() => {
-            jest.useFakeTimers();
-            jest.setSystemTime(0);
+            vi.useFakeTimers();
+            vi.setSystemTime(0);
         });
 
-        afterAll(() => jest.useRealTimers());
+        afterAll(() => vi.useRealTimers());
 
         beforeEach(async () => {
             const typedMockClient = new MockCallMatrixClient(FAKE_USER_ID_1, FAKE_DEVICE_ID_1, FAKE_SESSION_ID_1);
@@ -1712,9 +1728,9 @@ describe("Group Call", function () {
         it("with number should stop existing stats", async () => {
             const stats = groupCall.getGroupCallStats();
             // @ts-ignore
-            const stop = jest.spyOn(stats, "stop");
+            const stop = vi.spyOn(stats, "stop");
             // @ts-ignore
-            const start = jest.spyOn(stats, "start");
+            const start = vi.spyOn(stats, "start");
             groupCall.setGroupCallStatsInterval(0);
 
             expect(stop).toHaveBeenCalled();
@@ -1724,9 +1740,9 @@ describe("Group Call", function () {
         it("with number should restart existing stats", async () => {
             const stats = groupCall.getGroupCallStats();
             // @ts-ignore
-            const stop = jest.spyOn(stats, "stop");
+            const stop = vi.spyOn(stats, "stop");
             // @ts-ignore
-            const start = jest.spyOn(stats, "start");
+            const start = vi.spyOn(stats, "start");
             groupCall.setGroupCallStatsInterval(10000);
 
             expect(stop).toHaveBeenCalled();
@@ -1739,7 +1755,7 @@ describe("Group Call", function () {
         let reportEmitter: StatsReportEmitter;
         const report: CallFeedReport = {} as CallFeedReport;
         beforeEach(async () => {
-            CallFeedStatsReporter.expandCallFeedReport = jest.fn().mockReturnValue(report);
+            CallFeedStatsReporter.expandCallFeedReport = vi.fn().mockReturnValue(report);
             const typedMockClient = new MockCallMatrixClient(FAKE_USER_ID_1, FAKE_DEVICE_ID_1, FAKE_SESSION_ID_1);
             const mockClient = typedMockClient.typed();
             const room = new Room(FAKE_ROOM_ID, mockClient, FAKE_USER_ID_1);
@@ -1751,7 +1767,7 @@ describe("Group Call", function () {
                 userId: FAKE_USER_ID_2,
                 membership: KnownMembership.Join,
             } as unknown as RoomMember;
-            room.currentState.getStateEvents = jest.fn().mockImplementation(mockGetStateEvents());
+            room.currentState.getStateEvents = vi.fn().mockImplementation(mockGetStateEvents());
             groupCall = await createAndEnterGroupCall(mockClient, room);
             reportEmitter = groupCall.getGroupCallStats().reports;
         });

@@ -25,13 +25,12 @@ const zeroSalt = new Uint8Array(8);
  * @param key
  * @param name
  */
-export async function deriveKeys(key: Uint8Array, name: string): Promise<[CryptoKey, CryptoKey]> {
+export async function deriveKeys(key: Uint8Array<ArrayBuffer>, name: string): Promise<[CryptoKey, CryptoKey]> {
     const hkdfkey = await globalThis.crypto.subtle.importKey("raw", key, { name: "HKDF" }, false, ["deriveBits"]);
     const keybits = await globalThis.crypto.subtle.deriveBits(
         {
             name: "HKDF",
             salt: zeroSalt,
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
             // @ts-ignore: https://github.com/microsoft/TypeScript-DOM-lib-generator/pull/879
             info: new TextEncoder().encode(name),
             hash: "SHA-256",

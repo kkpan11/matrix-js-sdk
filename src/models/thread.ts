@@ -14,20 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { Optional } from "matrix-events-sdk";
-
-import { MatrixClient, PendingEventOrdering } from "../client.ts";
+import { type MatrixClient, PendingEventOrdering } from "../client.ts";
 import { TypedReEmitter } from "../ReEmitter.ts";
 import { RelationType } from "../@types/event.ts";
-import { IThreadBundledRelationship, MatrixEvent, MatrixEventEvent } from "./event.ts";
+import { type IThreadBundledRelationship, MatrixEvent, MatrixEventEvent } from "./event.ts";
 import { Direction, EventTimeline } from "./event-timeline.ts";
-import { EventTimelineSet, EventTimelineSetHandlerMap } from "./event-timeline-set.ts";
-import { NotificationCountType, Room, RoomEvent } from "./room.ts";
-import { RoomState } from "./room-state.ts";
+import { EventTimelineSet, type EventTimelineSetHandlerMap } from "./event-timeline-set.ts";
+import { type NotificationCountType, type Room, RoomEvent } from "./room.ts";
+import { type RoomState } from "./room-state.ts";
 import { ServerControlledNamespacedValue } from "../NamespacedValue.ts";
 import { logger } from "../logger.ts";
 import { ReadReceipt } from "./read-receipt.ts";
-import { CachedReceiptStructure, Receipt, ReceiptType } from "../@types/read_receipts.ts";
+import { type CachedReceiptStructure, type Receipt, ReceiptType } from "../@types/read_receipts.ts";
 import { Feature, ServerSupport } from "../feature.ts";
 
 export enum ThreadEvent {
@@ -134,6 +132,8 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
      */
     public initialEventsFetched = !Thread.hasServerSideSupport;
     private initalEventFetchProm: Promise<boolean> | undefined;
+    private preInitEventTargets = new Map<string, MatrixEvent>();
+    private preInitObserverState = { active: true };
 
     /**
      * An array of events to add to the timeline once the thread has been initialised
@@ -172,6 +172,9 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
         this.reEmitter = new TypedReEmitter(this);
 
         this.reEmitter.reEmit(this.timelineSet, [RoomEvent.Timeline, RoomEvent.TimelineReset]);
+        this.once(ThreadEvent.Delete, () => {
+            this.preInitObserverState.active = false;
+        });
 
         this.room.on(MatrixEventEvent.BeforeRedaction, this.onBeforeRedaction);
         this.room.on(RoomEvent.Redaction, this.onRedaction);
@@ -366,10 +369,19 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
         // Modify this event to point at our room's state, and mark its thread
         // as this.
         this.setEventMetadata(event);
+        const eventId = event.getId();
+        if (
+            !this.initialEventsFetched &&
+            eventId &&
+            !event.isRelation(RelationType.Annotation) &&
+            !event.isRelation(RelationType.Replace)
+        ) {
+            this.preInitEventTargets.set(eventId, event);
+        }
 
         // Decide whether this event is going to be added at the end of the timeline.
         const lastReply = this.lastReply();
-        const isNewestReply = !lastReply || event.localTimestamp >= lastReply!.localTimestamp;
+        const isNewestReply = !lastReply || event.localTimestamp >= lastReply.localTimestamp;
 
         if (!Thread.hasServerSideSupport) {
             // When there's no server-side support, just add it to the end of the timeline.
@@ -439,6 +451,34 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
              * has been initialised properly.
              */
             this.replayEvents?.push(event);
+
+            // Aggregate annotations immediately to keep reaction counts visible.
+            if (event.isRelation(RelationType.Annotation)) {
+                this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
+            }
+
+            // Edits can also be aggregated immediately when their target is already
+            // known. If it is not known yet, replay still handles them after pagination.
+            if (event.isRelation(RelationType.Replace)) {
+                const targetEventId = event.getRelation()?.event_id;
+                const targetEvent = targetEventId ? this.findPreInitTargetEvent(targetEventId) : undefined;
+                if (targetEvent && targetEventId) {
+                    const weakThread = new WeakRef(this);
+                    const observerState = this.preInitObserverState;
+                    const eventId = event.getId();
+                    void this.timelineSet.relations
+                        .aggregateChildEvent(event, this.timelineSet, targetEvent)
+                        .then(() => {
+                            const thread = weakThread.deref();
+                            if (!thread || !observerState.active) return;
+                            const effectiveTarget = thread.findPreInitTargetEvent(targetEventId);
+                            if (effectiveTarget?.replacingEvent()?.getId() === eventId) {
+                                thread.emit(ThreadEvent.Update, thread);
+                            }
+                        })
+                        .catch((error) => logger.error("Failed to aggregate pre-initialization thread edit: ", error));
+                }
+            }
         } else {
             // Case 2: this is happening later, and we have a timeline. In
             // this case, these events might be out-of order.
@@ -465,13 +505,20 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
             } else {
                 this.addEventToTimeline(event, toStartOfTimeline);
             }
+            // Aggregation is handled by EventTimelineSet when inserting/adding.
         }
-        // Apply annotations and replace relations to the relations of the timeline only
-        this.timelineSet.relations?.aggregateParentEvent(event);
-        this.timelineSet.relations?.aggregateChildEvent(event, this.timelineSet);
     }
 
-    public async processEvent(event: Optional<MatrixEvent>): Promise<void> {
+    private findPreInitTargetEvent(eventId: string): MatrixEvent | undefined {
+        return (
+            this.timelineSet.findEventById(eventId) ??
+            this.room.findEventById(eventId) ??
+            this.preInitEventTargets.get(eventId) ??
+            (this.lastEvent?.getId() === eventId ? this.lastEvent : undefined)
+        );
+    }
+
+    public async processEvent(event: MatrixEvent | null | undefined): Promise<void> {
         if (event) {
             this.setEventMetadata(event);
             await this.fetchEditsWhereNeeded(event);
@@ -639,6 +686,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
                         this.addEvent(event, false);
                     }
                     this.replayEvents = null;
+                    this.preInitEventTargets.clear();
                     // just to make sure that, if we've created a timeline window for this thread before the thread itself
                     // existed (e.g. when creating a new thread), we'll make sure the panel is force refreshed correctly.
                     this.emit(RoomEvent.TimelineReset, this.room, this.timelineSet, true);
@@ -681,14 +729,14 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
         }
     }
 
-    public setEventMetadata(event: Optional<MatrixEvent>): void {
+    public setEventMetadata(event: MatrixEvent | null | undefined): void {
         if (event) {
             EventTimeline.setEventMetadata(event, this.roomState, false);
             event.setThread(this);
         }
     }
 
-    public clearEventMetadata(event: Optional<MatrixEvent>): void {
+    public clearEventMetadata(event: MatrixEvent | null | undefined): void {
         if (event) {
             event.setThread(undefined);
             delete event.event?.unsigned?.["m.relations"]?.[THREAD_RELATION_TYPE.name];
@@ -734,7 +782,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
      * A getter for the last event of the thread.
      * This might be a synthesized event, if so, it will not emit any events to listeners.
      */
-    public get replyToEvent(): Optional<MatrixEvent> {
+    public get replyToEvent(): MatrixEvent | null {
         return this.lastPendingEvent ?? this.lastEvent ?? this.lastReply();
     }
 
@@ -911,8 +959,8 @@ export const FILTER_RELATED_BY_REL_TYPES = new ServerControlledNamespacedValue(
 export const THREAD_RELATION_TYPE = new ServerControlledNamespacedValue("m.thread", "io.element.thread");
 
 export enum ThreadFilterType {
-    "My",
-    "All",
+    My,
+    All,
 }
 
 export function threadFilterTypeToFilter(type: ThreadFilterType | null): "all" | "participated" {

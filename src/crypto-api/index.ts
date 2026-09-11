@@ -14,23 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import type { SecretsBundle } from "@matrix-org/matrix-sdk-crypto-wasm";
 import type { IMegolmSessionData } from "../@types/crypto.ts";
 import type { ToDeviceBatch, ToDevicePayload } from "../models/ToDeviceMessage.ts";
-import { Room } from "../models/room.ts";
-import { DeviceMap } from "../models/device.ts";
-import { UIAuthCallback } from "../interactive-auth.ts";
-import { PassphraseInfo, SecretStorageKeyDescription } from "../secret-storage.ts";
-import { VerificationRequest } from "./verification.ts";
+import { type Room } from "../models/room.ts";
+import { type DeviceMap } from "../models/device.ts";
+import { type UIAuthCallback } from "../interactive-auth.ts";
+import { type PassphraseInfo, type SecretStorageKey, type SecretStorageKeyDescription } from "../secret-storage.ts";
+import { type VerificationRequest } from "./verification.ts";
 import {
-    BackupTrustInfo,
-    KeyBackupCheck,
-    KeyBackupInfo,
-    KeyBackupRestoreOpts,
-    KeyBackupRestoreResult,
+    type BackupTrustInfo,
+    type KeyBackupCheck,
+    type KeyBackupInfo,
+    type KeyBackupRestoreOpts,
+    type KeyBackupRestoreResult,
 } from "./keybackup.ts";
-import { ISignatures } from "../@types/signed.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type ISignatures } from "../@types/signed.ts";
+import { type MatrixEvent } from "../models/event.ts";
+import type { SecretsBundleJson } from "../@types/matrix-sdk-crypto-wasm.d.ts";
 
 /**
  * `matrix-js-sdk/lib/crypto-api`: End-to-end encryption support.
@@ -42,9 +42,38 @@ import { MatrixEvent } from "../models/event.ts";
  */
 
 /**
+ * The options to start device dehydration.
+ */
+export interface StartDehydrationOpts {
+    /**
+     * Force creation of a new dehydration key, even if there is already an
+     * existing dehydration key. If `false`, and `onlyIfKeyCached` is `false`, a
+     * new key will be created if there is no existing dehydration key, whether
+     * already cached in our local storage or stored in Secret Storage.
+     *
+     * Checking for the presence of the key in Secret Storage may result in the
+     * `getSecretStorageKey` callback being called.
+     *
+     * Defaults to `false`.
+     */
+    createNewKey?: boolean;
+    /**
+     * Only start dehydration if we have a dehydration key cached in our local
+     * storage. If `true`, Secret Storage will not be checked. Defaults to
+     * `false`.
+     */
+    onlyIfKeyCached?: boolean;
+    /**
+     * Try to rehydrate a device before creating a new dehydrated device.
+     * Setting this to `false` may be useful for situations where the client is
+     * known to pre-date the dehydrated device, and so rehydration is
+     * unnecessary. Defaults to `true`.
+     */
+    rehydrate?: boolean;
+}
+
+/**
  * Public interface to the cryptography parts of the js-sdk
- *
- * @remarks Currently, this is a work-in-progress. In time, more methods will be added here.
  */
 export interface CryptoApi {
     /**
@@ -86,6 +115,11 @@ export interface CryptoApi {
      * us.
      */
     isEncryptionEnabledInRoom(roomId: string): Promise<boolean>;
+
+    /**
+     * Check if we believe the given room supports encrypted state events.
+     */
+    isStateEncryptionEnabledInRoom(roomId: string): Promise<boolean>;
 
     /**
      * Perform any background tasks that can be done before a message is ready to
@@ -152,7 +186,9 @@ export interface CryptoApi {
     /**
      * Check if the given user has published cross-signing keys.
      *
-     * - If the user is tracked, a `/keys/query` request is made to update locally the cross signing keys.
+     * - If the user is this user, a `/keys/query` request is made to update locally the cross signing keys.
+     * - If the user is tracked, any current `/keys/query` requests are awaited (with a timeout) and then
+     *   the locally cached information is used.
      * - If the user is not tracked locally and downloadUncached is set to true,
      *   a `/keys/query` request is made to the server to retrieve the cross signing keys.
      * - Otherwise, return false
@@ -169,7 +205,10 @@ export interface CryptoApi {
      * Get the device information for the given list of users.
      *
      * For any users whose device lists are cached (due to sharing an encrypted room with the user), the
-     * cached device data is returned.
+     * cached device data is returned, unless it is stale.
+     *
+     * If there are users with stale cached entries, wait (with some timeout) for any in-progress
+     * `/keys/query` request to complete.
      *
      * If there are uncached users, and the `downloadUncached` parameter is set to `true`,
      * a `/keys/query` request is made to the server to retrieve these devices.
@@ -222,6 +261,23 @@ export interface CryptoApi {
     pinCurrentUserIdentity(userId: string): Promise<void>;
 
     /**
+     * Remove the requirement for this identity to be verified, and pin it.
+     *
+     * This is useful if the user was previously verified but is not anymore
+     * ({@link UserVerificationStatus.wasCrossSigningVerified}) and it is not possible to verify him again now.
+     */
+    withdrawVerificationRequirement(userId: string): Promise<void>;
+
+    /**
+     * Get the given user's public cross-signing keys, if they have published any, and we have fetched them to
+     * our store.
+     *
+     * Normally this is only useful to applications as debug info, since the SDK handles keeping track of a
+     * user's identity, and whether their devices are verified.
+     */
+    getUserCrossSigningKeys(userId: string): Promise<Partial<CrossSigningKeys> | null>;
+
+    /**
      * Get the verification status of a given device.
      *
      * @param userId - The ID of the user whose device is to be checked.
@@ -243,8 +299,6 @@ export interface CryptoApi {
      * @param verified - whether to mark the device as verified. Defaults to 'true'.
      *
      * @throws an error if the device is unknown, or has not published any encryption keys.
-     *
-     * @remarks Fires {@link matrix.CryptoEvent.DeviceVerificationChanged}
      */
     setDeviceVerified(userId: string, deviceId: string, verified?: boolean): Promise<void>;
 
@@ -327,6 +381,11 @@ export interface CryptoApi {
     isSecretStorageReady(): Promise<boolean>;
 
     /**
+     * Inspect the status of secret storage, in more detail than {@link isSecretStorageReady}.
+     */
+    getSecretStorageStatus(): Promise<SecretStorageStatus>;
+
+    /**
      * Bootstrap [secret storage](https://spec.matrix.org/v1.12/client-server-api/#storage).
      *
      * - If secret storage is not already set up, or {@link CreateSecretStorageOpts.setupNewSecretStorage} is set:
@@ -396,6 +455,25 @@ export interface CryptoApi {
         payload: ToDevicePayload,
     ): Promise<ToDeviceBatch>;
 
+    /**
+     * Reset the encryption of the user by going through the following steps:
+     * - Remove the dehydrated device and stop the periodic creation of dehydrated devices.
+     * - Disable backing up room keys and delete any existing backups.
+     * - Remove the default secret storage key from the account data (ie: the recovery key).
+     * - Reset the cross-signing keys.
+     * - Create a new key backup.
+     *
+     * Note that the dehydrated device will be removed, but will not be replaced
+     * and it will not schedule creating new dehydrated devices.  To do this,
+     * {@link startDehydration} should be called after a new secret storage key
+     * is created.
+     *
+     * @param authUploadDeviceSigningKeys - Callback to authenticate the upload of device signing keys.
+     *      Used when resetting the cross signing keys.
+     *      See {@link BootstrapCrossSigningOpts#authUploadDeviceSigningKeys}.
+     */
+    resetEncryption(authUploadDeviceSigningKeys: UIAuthCallback<void>): Promise<void>;
+
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //
     // Device/User verification
@@ -410,16 +488,6 @@ export interface CryptoApi {
      * @returns the VerificationRequests that are in progress
      */
     getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[];
-
-    /**
-     * Finds a DM verification request that is already in progress for the given room id
-     *
-     * @param roomId - the room to use for verification
-     *
-     * @returns the VerificationRequest that is in progress, if any
-     * @deprecated prefer `userId` parameter variant.
-     */
-    findVerificationRequestDMInProgress(roomId: string): VerificationRequest | undefined;
 
     /**
      * Finds a DM verification request that is already in progress for the given room and user.
@@ -492,18 +560,6 @@ export interface CryptoApi {
      * Store the backup decryption key.
      *
      * This should be called if the client has received the key from another device via secret sharing (gossiping).
-     * It is the responsability of the caller to check that the decryption key is valid for the current backup version.
-     *
-     * @param key - the backup decryption key
-     *
-     * @deprecated prefer the variant with a `version` parameter.
-     */
-    storeSessionBackupPrivateKey(key: Uint8Array): Promise<void>;
-
-    /**
-     * Store the backup decryption key.
-     *
-     * This should be called if the client has received the key from another device via secret sharing (gossiping).
      * It is the responsability of the caller to check that the decryption key is valid for the given backup version.
      *
      * @param key - the backup decryption key
@@ -518,8 +574,11 @@ export interface CryptoApi {
      * if they match, stores the key in the crypto store by calling {@link storeSessionBackupPrivateKey},
      * which enables automatic restore of individual keys when an Unable-to-decrypt error is encountered.
      *
-     * If we are unable to fetch the key from secret storage, there is no backup on the server, or the key
-     * does not match, throws an exception.
+     * If the backup decryption key from secret storage does not match the
+     * latest backup on the server, we throw a {@link DecryptionKeyDoesNotMatchError}.
+     *
+     * If we are unable to fetch the key from secret storage or there is no backup on the server,
+     * we throw an exception.
      */
     loadSessionBackupPrivateKeyFromSecretStorage(): Promise<void>;
 
@@ -533,7 +592,7 @@ export interface CryptoApi {
     /**
      * Determine if a key backup can be trusted.
      *
-     * @param info - key backup info dict from {@link matrix.MatrixClient.getKeyBackupVersion}.
+     * @param info - key backup info dict from {@link CryptoApi.getKeyBackupInfo}.
      */
     isKeyBackupTrusted(info: KeyBackupInfo): Promise<BackupTrustInfo>;
 
@@ -571,6 +630,15 @@ export interface CryptoApi {
      * The backup engine will be started using the new backup version (i.e., {@link checkKeyBackupAndEnable} is called).
      */
     resetKeyBackup(): Promise<void>;
+
+    /**
+     * Disables server-side key storage and deletes server-side backups.
+     *  * Deletes the current key backup version, if any (but not any previous versions).
+     *  * Disables 4S, deleting the info for the default key, the default key pointer itself and any
+     *    known 4S data (cross-signing keys and the megolm key backup key).
+     *  * Deletes any dehydrated devices.
+     */
+    disableKeyStorage(): Promise<void>;
 
     /**
      * Deletes the given key backup.
@@ -627,10 +695,11 @@ export interface CryptoApi {
     /**
      * Start using device dehydration.
      *
-     * - Rehydrates a dehydrated device, if one is available.
+     * - Rehydrates a dehydrated device, if one is available and `opts.rehydrate`
+     *   is `true`.
      * - Creates a new dehydration key, if necessary, and stores it in Secret
      *   Storage.
-     *   - If `createNewKey` is set to true, always creates a new key.
+     *   - If `opts.createNewKey` is set to true, always creates a new key.
      *   - If a dehydration key is not available, creates a new one.
      * - Creates a new dehydrated device, and schedules periodically creating
      *   new dehydrated devices.
@@ -639,11 +708,11 @@ export interface CryptoApi {
      * `true`, and must not be called until after cross-signing and secret
      * storage have been set up.
      *
-     * @param createNewKey - whether to force creation of a new dehydration key.
-     *   This can be used, for example, if Secret Storage is being reset.  Defaults
-     *   to false.
+     * @param opts - options for device dehydration. For backwards compatibility
+     *     with old code, a boolean can be given here, which will be treated as
+     *     the `createNewKey` option. However, this is deprecated.
      */
-    startDehydration(createNewKey?: boolean): Promise<void>;
+    startDehydration(opts?: StartDehydrationOpts | boolean): Promise<void>;
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //
@@ -652,15 +721,15 @@ export interface CryptoApi {
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /**
-     * Export secrets bundle for transmitting to another device as part of OIDC QR login
+     * Export secrets bundle for transmitting to another device as part of OAuth2 QR login
      */
-    exportSecretsBundle?(): Promise<Awaited<ReturnType<SecretsBundle["to_json"]>>>;
+    exportSecretsBundle?(): Promise<SecretsBundleJson>;
 
     /**
      * Import secrets bundle transmitted from another device.
      * @param secrets - The secrets bundle received from the other device
      */
-    importSecretsBundle?(secrets: Awaited<ReturnType<SecretsBundle["to_json"]>>): Promise<void>;
+    importSecretsBundle?(secrets: SecretsBundleJson): Promise<void>;
 }
 
 /** A reason code for a failure to decrypt an event. */
@@ -719,45 +788,6 @@ export enum DecryptionFailureCode {
 
     /** Unknown or unclassified error. */
     UNKNOWN_ERROR = "UNKNOWN_ERROR",
-
-    /** @deprecated only used in legacy crypto */
-    MEGOLM_BAD_ROOM = "MEGOLM_BAD_ROOM",
-
-    /** @deprecated only used in legacy crypto */
-    MEGOLM_MISSING_FIELDS = "MEGOLM_MISSING_FIELDS",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_DECRYPT_GROUP_MESSAGE_ERROR = "OLM_DECRYPT_GROUP_MESSAGE_ERROR",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_ENCRYPTED_MESSAGE = "OLM_BAD_ENCRYPTED_MESSAGE",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_RECIPIENT = "OLM_BAD_RECIPIENT",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_RECIPIENT_KEY = "OLM_BAD_RECIPIENT_KEY",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_ROOM = "OLM_BAD_ROOM",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_SENDER_CHECK_FAILED = "OLM_BAD_SENDER_CHECK_FAILED",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_BAD_SENDER = "OLM_BAD_SENDER",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_FORWARDED_MESSAGE = "OLM_FORWARDED_MESSAGE",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_MISSING_CIPHERTEXT = "OLM_MISSING_CIPHERTEXT",
-
-    /** @deprecated only used in legacy crypto */
-    OLM_NOT_INCLUDED_IN_RECIPIENTS = "OLM_NOT_INCLUDED_IN_RECIPIENTS",
-
-    /** @deprecated only used in legacy crypto */
-    UNKNOWN_ENCRYPTION_ALGORITHM = "UNKNOWN_ENCRYPTION_ALGORITHM",
 }
 
 /** Base {@link DeviceIsolationMode} kind. */
@@ -774,6 +804,9 @@ export enum DeviceIsolationModeKind {
  *
  * Events from all senders are always decrypted (and should be decorated with message shields in case
  * of authenticity warnings, see {@link EventEncryptionInfo}).
+ *
+ * `AllDevicesIsolationMode` is used in the legacy, non-'exclude insecure devices' mode in Element Web. It is not
+ * recommended (see {@link https://github.com/matrix-org/matrix-spec-proposals/pull/4153 | MSC4153}).
  */
 export class AllDevicesIsolationMode {
     public readonly kind = DeviceIsolationModeKind.AllDevicesIsolationMode;
@@ -800,6 +833,9 @@ export class AllDevicesIsolationMode {
  *
  * Events are decrypted only if they come from a cross-signed device. Other events will result in a decryption
  * failure. (To access the failure reason, see {@link MatrixEvent.decryptionFailureReason}.)
+ *
+ * `OnlySignedDevicesIsolationMode` corresponds to the 'Exclude insecure devices' mode in Element Web, which is
+ * recommended by {@link https://github.com/matrix-org/matrix-spec-proposals/pull/4153 | MSC4153}.
  */
 export class OnlySignedDevicesIsolationMode {
     public readonly kind = DeviceIsolationModeKind.OnlySignedDevicesIsolationMode;
@@ -832,6 +868,25 @@ export interface BootstrapCrossSigningOpts {
  */
 export class UserVerificationStatus {
     /**
+     * Indicates if we have saved a known identity for this user. Typically, this means that we share a
+     * room with them (or have done in the past).
+     *
+     * If this is `false`, then the other flags ({@link isCrossSigningVerified}, {@link wasCrossSigningVerified},
+     * {@link needsUserApproval}) will also be `false`. This means that we haven't seen this user before.
+     *
+     * If this is `true`, then there are further possibilities:
+     *
+     *  - If {@link isCrossSigningVerified} returns `true`, then we have cryptographically verified the current
+     *    identity of this user: that is the highest form of trust we have.
+     *
+     *  - If {@link needsUserApproval} is `true`, that means that the user has changed their identity.
+     *
+     *  - Otherwise, the user is "TOFU trusted": we have a record of their identity, and, typically, will share
+     *    encrypted content with them as long as they retain that identity.
+     */
+    public readonly known: boolean;
+
+    /**
      * Indicates if the identity has changed in a way that needs user approval.
      *
      * This happens if the identity has changed since we first saw it, *unless* the new identity has also been verified
@@ -846,12 +901,14 @@ export class UserVerificationStatus {
      */
     public readonly needsUserApproval: boolean;
 
+    /** @internal */
     public constructor(
         private readonly crossSigningVerified: boolean,
         private readonly crossSigningVerifiedBefore: boolean,
-        private readonly tofu: boolean,
+        known: boolean,
         needsUserApproval: boolean = false,
     ) {
+        this.known = known;
         this.needsUserApproval = needsUserApproval;
     }
 
@@ -883,7 +940,7 @@ export class UserVerificationStatus {
      * @deprecated No longer supported, with the Rust crypto stack.
      */
     public isTofu(): boolean {
-        return this.tofu;
+        return false;
     }
 }
 
@@ -937,7 +994,7 @@ export class DeviceVerificationStatus {
      * Check if we should consider this device "verified".
      *
      * A device is "verified" if either:
-     *  * it has been manually marked as such via {@link matrix.MatrixClient.setDeviceVerified}.
+     *  * it has been manually marked as such via {@link CryptoApi.setDeviceVerified}.
      *  * it has been cross-signed with a verified signing key, **and** the client has been configured to trust
      *    cross-signed devices via {@link CryptoApi.setTrustCrossSignedDevices}.
      *
@@ -949,17 +1006,71 @@ export class DeviceVerificationStatus {
 }
 
 /**
+ * Enum representing the different stages of importing room keys.
+ *
+ * This is the type of the `stage` property of {@link ImportRoomKeyProgressData}.
+ */
+export enum ImportRoomKeyStage {
+    /**
+     * The stage where room keys are being fetched.
+     *
+     * @see {@link ImportRoomKeyFetchProgress}.
+     */
+    Fetch = "fetch",
+    /**
+     * The stage where room keys are being loaded.
+     *
+     * @see {@link ImportRoomKeyLoadProgress}.
+     */
+    LoadKeys = "load_keys",
+}
+
+/**
+ * Type representing the progress during the 'fetch' stage of the room key import process.
+ *
+ * @see {@link ImportRoomKeyProgressData}.
+ */
+export type ImportRoomKeyFetchProgress = {
+    /**
+     * The current stage of the import process.
+     */
+    stage: ImportRoomKeyStage.Fetch;
+};
+
+/**
+ * Type representing the progress during the 'load_keys' stage of the room key import process.
+ *
+ * @see {@link ImportRoomKeyProgressData}.
+ */
+export type ImportRoomKeyLoadProgress = {
+    /**
+     * The current stage of the import process.
+     */
+    stage: ImportRoomKeyStage.LoadKeys;
+
+    /**
+     * The number of successfully loaded room keys so far.
+     */
+    successes: number;
+
+    /**
+     * The number of room keys that failed to load so far.
+     */
+    failures: number;
+
+    /**
+     * The total number of room keys being loaded.
+     */
+    total: number;
+};
+
+/**
  * Room key import progress report.
  * Used when calling {@link CryptoApi#importRoomKeys},
  * {@link CryptoApi#importRoomKeysAsJson} or {@link CryptoApi#restoreKeyBackup} as the parameter of
  * the progressCallback. Used to display feedback.
  */
-export interface ImportRoomKeyProgressData {
-    stage: string; // TODO: Enum
-    successes?: number;
-    failures?: number;
-    total?: number;
-}
+export type ImportRoomKeyProgressData = ImportRoomKeyFetchProgress | ImportRoomKeyLoadProgress;
 
 /**
  * Options object for {@link CryptoApi#importRoomKeys} and
@@ -968,8 +1079,6 @@ export interface ImportRoomKeyProgressData {
 export interface ImportRoomKeysOpts {
     /** Reports ongoing progress of the import process. Can be used for feedback. */
     progressCallback?: (stage: ImportRoomKeyProgressData) => void;
-    /** @deprecated the rust SDK will always such imported keys as untrusted */
-    untrusted?: boolean;
     /** @deprecated not useful externally */
     source?: string;
 }
@@ -1055,14 +1164,7 @@ export interface CryptoCallbacks {
             keys: Record<string, SecretStorageKeyDescription>;
         },
         name: string,
-    ) => Promise<[string, Uint8Array] | null>;
-
-    /** @deprecated: unused with the Rust crypto stack. */
-    getCrossSigningKey?: (keyType: string, pubKey: string) => Promise<Uint8Array | null>;
-    /** @deprecated: unused with the Rust crypto stack. */
-    saveCrossSigningKeys?: (keys: Record<string, Uint8Array>) => void;
-    /** @deprecated: unused with the Rust crypto stack. */
-    shouldUpgradeDeviceVerifications?: (users: Record<string, any>) => Promise<string[]>;
+    ) => Promise<[string, Uint8Array<ArrayBuffer>] | null>;
 
     /**
      * Called by {@link CryptoApi.bootstrapSecretStorage} when a new default secret storage key is created.
@@ -1074,25 +1176,31 @@ export interface CryptoCallbacks {
      * @param keyInfo - secret storage key info
      * @param key - private key to store
      */
-    cacheSecretStorageKey?: (keyId: string, keyInfo: SecretStorageKeyDescription, key: Uint8Array) => void;
+    cacheSecretStorageKey?: (keyId: string, keyInfo: SecretStorageKeyDescription, key: Uint8Array<ArrayBuffer>) => void;
+}
 
-    /** @deprecated: unused with the Rust crypto stack. */
-    onSecretRequested?: (
-        userId: string,
-        deviceId: string,
-        requestId: string,
-        secretName: string,
-        deviceTrust: DeviceVerificationStatus,
-    ) => Promise<string | undefined>;
+/**
+ * The result of a call to {@link CryptoApi.getSecretStorageStatus}.
+ */
+export interface SecretStorageStatus {
+    /** Whether secret storage is fully populated. The same as {@link CryptoApi.isSecretStorageReady}. */
+    ready: boolean;
 
-    /** @deprecated: unused with the Rust crypto stack. */
-    getDehydrationKey?: (
-        keyInfo: SecretStorageKeyDescription,
-        checkFunc: (key: Uint8Array) => void,
-    ) => Promise<Uint8Array>;
+    /** The ID of the current default secret storage key. */
+    defaultKeyId: string | null;
 
-    /** @deprecated: unused with the Rust crypto stack. */
-    getBackupKey?: () => Promise<Uint8Array>;
+    /**
+     * For each secret that we checked whether it is correctly stored in secret storage with the default secret storage key.
+     *
+     * Note that we will only check that the key backup key is stored if key backup is currently enabled (i.e. that
+     * {@link CryptoApi.getActiveSessionBackupVersion} returns non-null). `m.megolm_backup.v1` will only be present in that case.
+     *
+     * (This is an object rather than a `Map` so that it JSON.stringify()s nicely, since its main purpose is to end up
+     * in logs.)
+     */
+    secretStorageKeyValidityMap: {
+        [P in SecretStorageKey]?: boolean;
+    };
 }
 
 /**
@@ -1108,13 +1216,6 @@ export interface CreateSecretStorageOpts {
     createSecretStorageKey?: () => Promise<GeneratedSecretStorageKey>;
 
     /**
-     * The current key backup object. If passed,
-     * the passphrase and recovery key from this backup will be used.
-     * @deprecated Not used by the Rust crypto stack.
-     */
-    keyBackupInfo?: KeyBackupInfo;
-
-    /**
      * If true, a new key backup version will be
      * created and the private key stored in the new SSSS store. Ignored if keyBackupInfo
      * is supplied.
@@ -1125,26 +1226,19 @@ export interface CreateSecretStorageOpts {
      * Reset even if keys already exist.
      */
     setupNewSecretStorage?: boolean;
-
-    /**
-     * Function called to get the user's current key backup passphrase.
-     *
-     * Should return a promise that resolves with a Uint8Array
-     * containing the key, or rejects if the key cannot be obtained.
-     *
-     * Only used when the client has existing key backup, but no secret storage.
-     *
-     * @deprecated Not used by the Rust crypto stack.
-     */
-    getKeyBackupPassphrase?: () => Promise<Uint8Array>;
 }
 
 /** Types of cross-signing key */
 export enum CrossSigningKey {
-    Master = "master",
-    SelfSigning = "self_signing",
-    UserSigning = "user_signing",
+    Master = "master_key",
+    SelfSigning = "self_signing_key",
+    UserSigning = "user_signing_key",
 }
+
+/** All of a user's cross-signing keys.
+ * @see https://spec.matrix.org/v1.7/client-server-api/#post_matrixclientv3keysdevice_signingupload
+ */
+export type CrossSigningKeys = Record<CrossSigningKey, CrossSigningKeyInfo>;
 
 /**
  * Information on one of the cross-signing keys.
@@ -1168,7 +1262,7 @@ export interface GeneratedSecretStorageKey {
         name?: string;
     };
     /** The raw generated private key. */
-    privateKey: Uint8Array;
+    privateKey: Uint8Array<ArrayBuffer>;
     /** The generated key, encoded for display to the user per https://spec.matrix.org/v1.7/client-server-api/#key-representation. */
     encodedPrivateKey?: string;
 }
@@ -1221,11 +1315,17 @@ export enum EventShieldReason {
     /**
      * The (deprecated) sender_key field in the event does not match the Ed25519 key of the device that sent us the
      * decryption keys.
+     *
+     * @deprecated The sender_key field is not checked by matrix-sdk-crypto, and this value is therefore unused since
+     * the migration to matrix-sdk-crypto in v37.0.0.
      */
     MISMATCHED_SENDER_KEY,
 
     /**
      * The event was sent unencrypted in an encrypted room.
+     *
+     * @deprecated This has never been used. The fact it is here was due to a misunderstanding of the behaviour of
+     * `matrix-sdk-crypto`.
      */
     SENT_IN_CLEAR,
 
@@ -1233,6 +1333,12 @@ export enum EventShieldReason {
      * The sender was previously verified but changed their identity.
      */
     VERIFICATION_VIOLATION,
+
+    /**
+     * The `sender` field on the event does not match the owner of the device
+     * that established the Megolm session.
+     */
+    MISMATCHED_SENDER,
 }
 
 /** The result of a call to {@link CryptoApi.getOwnDeviceKeys} */
@@ -1241,6 +1347,39 @@ export interface OwnDeviceKeys {
     ed25519: string;
     /** Public part of the Curve25519 identity key for the current device, base64 encoded. */
     curve25519: string;
+}
+
+/**
+ * Information about the encryption of a successfully decrypted to-device message.
+ */
+export interface OlmEncryptionInfo {
+    /** The user ID of the event sender, note this is untrusted data unless `isVerified` is true **/
+    sender: string;
+    /**
+     * The device ID of the device that sent us the event.
+     * Note this is untrusted data unless {@link senderVerified} is true.
+     * If the device ID is not known, this will be `null`.
+     **/
+    senderDevice?: string;
+    /** The sender device's public Curve25519 key, base64 encoded **/
+    senderCurve25519KeyBase64: string;
+    /**
+     *  If true, this message is guaranteed to be authentic as it is coming from a device belonging to a user that we have verified.
+     *  This is the state at the time of decryption (the user could be verified later).
+     */
+    senderVerified: boolean;
+}
+
+/**
+ * An error thrown by loadSessionBackupPrivateKeyFromSecretStorage indicating
+ * that the decryption key found in secret storage does not match the public key
+ * of the latest backup.
+ */
+export class DecryptionKeyDoesNotMatchError extends Error {
+    public constructor(message: string) {
+        super(message);
+        this.name = "DecryptionKeyDoesNotMatchError";
+    }
 }
 
 export * from "./verification.ts";

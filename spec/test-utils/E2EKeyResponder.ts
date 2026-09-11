@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import fetchMock from "fetch-mock-jest";
+import fetchMock from "@fetch-mock/vitest";
 
 import { MapWithDefault } from "../../src/utils";
-import { IDownloadKeyResult } from "../../src";
-import { IDeviceKeys } from "../../src/@types/crypto";
-import { E2EKeyReceiver } from "./E2EKeyReceiver";
+import { type IDownloadKeyResult, type SigningKeys } from "../../src";
+import { type IDeviceKeys } from "../../src/@types/crypto";
+import { type E2EKeyReceiver } from "./E2EKeyReceiver";
 
 /**
  * An object which intercepts `/keys/query` fetches via fetch-mock.
@@ -42,26 +42,23 @@ export class E2EKeyResponder {
      */
     public constructor(homeserverUrl: string) {
         // set up a listener for /keys/query.
-        const listener = (url: string, options: RequestInit) => this.onKeyQueryRequest(options);
-        fetchMock.post(new URL("/_matrix/client/v3/keys/query", homeserverUrl).toString(), listener);
+        fetchMock.post(new URL("/_matrix/client/v3/keys/query", homeserverUrl).toString(), (callLog) =>
+            this.onKeyQueryRequest(callLog.options),
+        );
     }
 
     private onKeyQueryRequest(options: RequestInit) {
         const content = JSON.parse(options.body as string);
         const usersToReturn = Object.keys(content["device_keys"]);
         const response = {
-            device_keys: {} as { [userId: string]: any },
-            master_keys: {} as { [userId: string]: any },
-            self_signing_keys: {} as { [userId: string]: any },
-            user_signing_keys: {} as { [userId: string]: any },
-            failures: {} as { [serverName: string]: any },
-        };
+            device_keys: {},
+            master_keys: {},
+            self_signing_keys: {},
+            user_signing_keys: {},
+            failures: {},
+        } as IDownloadKeyResult;
         for (const user of usersToReturn) {
-            const userKeys = this.deviceKeysByUserByDevice.get(user);
-            if (userKeys !== undefined) {
-                response.device_keys[user] = Object.fromEntries(userKeys.entries());
-            }
-
+            // First see if we have an E2EKeyReceiver for this user, and if so, return any keys that have been uploaded
             const e2eKeyReceiver = this.e2eKeyReceiversByUser.get(user);
             if (e2eKeyReceiver !== undefined) {
                 const deviceKeys = e2eKeyReceiver.getUploadedDeviceKeys();
@@ -69,16 +66,27 @@ export class E2EKeyResponder {
                     response.device_keys[user] ??= {};
                     response.device_keys[user][deviceKeys.device_id] = deviceKeys;
                 }
+                const crossSigningKeys = e2eKeyReceiver.getUploadedCrossSigningKeys();
+                if (crossSigningKeys !== null) {
+                    response.master_keys![user] = crossSigningKeys["master_key"];
+                    response.self_signing_keys![user] = crossSigningKeys["self_signing_key"] as SigningKeys;
+                }
             }
 
+            // Mix in any keys that have been added explicitly to this E2EKeyResponder.
+            const userKeys = this.deviceKeysByUserByDevice.get(user);
+            if (userKeys !== undefined) {
+                response.device_keys[user] ??= {};
+                Object.assign(response.device_keys[user], Object.fromEntries(userKeys.entries()));
+            }
             if (this.masterKeysByUser.hasOwnProperty(user)) {
-                response.master_keys[user] = this.masterKeysByUser[user];
+                response.master_keys![user] = this.masterKeysByUser[user];
             }
             if (this.selfSigningKeysByUser.hasOwnProperty(user)) {
-                response.self_signing_keys[user] = this.selfSigningKeysByUser[user];
+                response.self_signing_keys![user] = this.selfSigningKeysByUser[user];
             }
             if (this.userSigningKeysByUser.hasOwnProperty(user)) {
-                response.user_signing_keys[user] = this.userSigningKeysByUser[user];
+                response.user_signing_keys![user] = this.userSigningKeysByUser[user];
             }
         }
         return response;

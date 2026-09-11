@@ -19,17 +19,17 @@ limitations under the License.
  * of requests.
  */
 import { logger } from "./logger.ts";
-import { MatrixEvent } from "./models/event.ts";
+import { type MatrixEvent } from "./models/event.ts";
 import { EventType } from "./@types/event.ts";
-import { defer, IDeferred, removeElement } from "./utils.ts";
-import { calculateRetryBackoff, MatrixError } from "./http-api/index.ts";
-import { ISendEventResponse } from "./@types/requests.ts";
+import { removeElement } from "./utils.ts";
+import { calculateRetryBackoff, type MatrixError } from "./http-api/index.ts";
+import { type ISendEventResponse } from "./@types/requests.ts";
 
 const DEBUG = false; // set true to enable console logging.
 
 interface IQueueEntry<T> {
     event: MatrixEvent;
-    defer: IDeferred<T>;
+    resolvers: PromiseWithResolvers<T>;
     attempts: number;
 }
 
@@ -40,14 +40,12 @@ interface IQueueEntry<T> {
  */
 type ProcessFunction<T> = (event: MatrixEvent) => Promise<T>;
 
-// eslint-disable-next-line camelcase
 export class MatrixScheduler<T = ISendEventResponse> {
     /**
      * Default retry algorithm for the matrix scheduler. Retries events up to 4 times with exponential backoff.
      * @param attempts - Number of attempts that have been made, including the one that just failed (ie. starting at 1)
      * @see retryAlgorithm
      */
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     public static RETRY_BACKOFF_RATELIMIT(event: MatrixEvent | null, attempts: number, err: MatrixError): number {
         return calculateRetryBackoff(err, attempts, false);
     }
@@ -57,7 +55,6 @@ export class MatrixScheduler<T = ISendEventResponse> {
      * concurrently.
      * @see queueAlgorithm
      */
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     public static QUEUE_MESSAGES(event: MatrixEvent): string | null {
         // enqueue messages or events that associate with another event (redactions and relations)
         if (event.getType() === EventType.RoomMessage || event.hasAssociation()) {
@@ -70,7 +67,7 @@ export class MatrixScheduler<T = ISendEventResponse> {
 
     // queueName: [{
     //  event: MatrixEvent,  // event to send
-    //  defer: Deferred,  // defer to resolve/reject at the END of the retries
+    //  defer: PromiseWithResolvers,  // defer to resolve/reject at the END of the retries
     //  attempts: Number  // number of times we've called processFn
     // }, ...]
     private readonly queues: Record<string, IQueueEntry<T>[]> = {};
@@ -188,15 +185,15 @@ export class MatrixScheduler<T = ISendEventResponse> {
         if (!this.queues[queueName]) {
             this.queues[queueName] = [];
         }
-        const deferred = defer<T>();
+        const eventResolvers = Promise.withResolvers<T>();
         this.queues[queueName].push({
             event: event,
-            defer: deferred,
+            resolvers: eventResolvers,
             attempts: 0,
         });
         debuglog("Queue algorithm dumped event %s into queue '%s'", event.getId(), queueName);
         this.startProcessingQueues();
-        return deferred.promise;
+        return eventResolvers.promise;
     }
 
     private startProcessingQueues(): void {
@@ -239,7 +236,7 @@ export class MatrixScheduler<T = ISendEventResponse> {
                     // remove this from the queue
                     this.removeNextEvent(queueName);
                     debuglog("Queue '%s' sent event %s", queueName, obj.event.getId());
-                    obj.defer.resolve(res);
+                    obj.resolvers.resolve(res);
                     // keep processing
                     this.processQueue(queueName);
                 },
@@ -279,7 +276,7 @@ export class MatrixScheduler<T = ISendEventResponse> {
         logger.info("clearing queue '%s'", queueName);
         let obj: IQueueEntry<T> | undefined;
         while ((obj = this.removeNextEvent(queueName))) {
-            obj.defer.reject(err);
+            obj.resolvers.reject(err);
         }
         this.disableQueue(queueName);
     }

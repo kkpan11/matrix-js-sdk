@@ -20,12 +20,11 @@ limitations under the License.
 
 import unhomoglyph from "unhomoglyph";
 import promiseRetry from "p-retry";
-import { Optional } from "matrix-events-sdk";
 
-import { IEvent, MatrixEvent } from "./models/event.ts";
+import { type IEvent, type MatrixEvent } from "./models/event.ts";
 import { M_TIMESTAMP } from "./@types/location.ts";
 import { ReceiptType } from "./@types/read_receipts.ts";
-import { BaseLogger } from "./logger.ts";
+import { type BaseLogger } from "./logger.ts";
 
 const interns = new Map<string, string>();
 
@@ -38,6 +37,7 @@ const interns = new Map<string, string>();
 export function internaliseString(str: string): string {
     // Unwrap strings before entering the map, if we somehow got a wrapped
     // string as our input. This should only happen from tests.
+    // oxlint-disable-next-line unicorn/no-instanceof-builtins
     if ((str as unknown) instanceof String) {
         str = str.toString();
     }
@@ -115,7 +115,7 @@ export function decodeParams(query: string): Record<string, string | string[]> {
  * variables with. E.g. `{ "$bar": "baz" }`.
  * @returns The result of replacing all template variables e.g. '/foo/baz'.
  */
-export function encodeUri(pathTemplate: string, variables: Record<string, Optional<string>>): string {
+export function encodeUri(pathTemplate: string, variables: Record<string, string | null | undefined>): string {
     for (const key in variables) {
         if (!variables.hasOwnProperty(key)) {
             continue;
@@ -227,12 +227,21 @@ export function deepCompare(x: any, y: any): boolean {
     }
 
     // everything else is either an unequal primitive, or an object
-    if (!(x instanceof Object)) {
+    // XXX: this check has been temporarily tweaked due to issues in the jest test environment,
+    // this will be reverted as part of the migration to vitest
+    if (
+        x.constructor.name !== "Object" &&
+        x.constructor.name !== "RegExp" &&
+        x.constructor.name !== "Date" &&
+        x.constructor.name !== "Array"
+    ) {
         return false;
     }
 
     // check they are the same type of object
-    if (x.constructor !== y.constructor || x.prototype !== y.prototype) {
+    // XXX: this check has been temporarily tweaked due to issues in the jest test environment,
+    // this will be reverted as part of the migration to vitest
+    if (x.prototype !== y.prototype) {
         return false;
     }
 
@@ -406,6 +415,23 @@ export async function logDuration<T>(logger: BaseLogger, name: string, block: ()
 }
 
 /**
+ * Utility to log the duration of a synchronous block.
+ *
+ * @param logger - The logger to log to.
+ * @param name - The name of the operation.
+ * @param block - The block to execute.
+ */
+export function logDurationSync<T>(logger: BaseLogger, name: string, block: () => T): T {
+    const start = Date.now();
+    try {
+        return block();
+    } finally {
+        const end = Date.now();
+        logger.debug(`[Perf]: ${name} took ${end - start}ms`);
+    }
+}
+
+/**
  * Promise/async version of {@link setImmediate}.
  *
  * Implementation is based on `setTimeout` for wider compatibility.
@@ -417,25 +443,6 @@ export function immediate(): Promise<void> {
 
 export function isNullOrUndefined(val: any): boolean {
     return val === null || val === undefined;
-}
-
-export interface IDeferred<T> {
-    resolve: (value: T | Promise<T>) => void;
-    reject: (reason?: any) => void;
-    promise: Promise<T>;
-}
-
-// Returns a Deferred
-export function defer<T = void>(): IDeferred<T> {
-    let resolve!: IDeferred<T>["resolve"];
-    let reject!: IDeferred<T>["reject"];
-
-    const promise = new Promise<T>((_resolve, _reject) => {
-        resolve = _resolve;
-        reject = _reject;
-    });
-
-    return { resolve, reject, promise };
 }
 
 export async function promiseMapSeries<T>(
@@ -467,15 +474,21 @@ export async function chunkPromises<T>(fns: (() => Promise<T>)[], chunkSize: num
  * should always return a new promise.
  * @param promiseFn - The function to call to get a fresh promise instance. Takes an
  * attempt count as an argument, for logging/debugging purposes.
+ * @param shouldRetry - Optional function which is called with the error the latest rejection from promiseFn,
+ * retrying will ba aborted if this return false.
  * @returns The promise for the retried operation.
  */
-export function simpleRetryOperation<T>(promiseFn: (attempt: number) => Promise<T>): Promise<T> {
+export function simpleRetryOperation<T>(
+    promiseFn: (attempt: number) => Promise<T>,
+    shouldRetry?: (e: unknown) => boolean,
+): Promise<T> {
     return promiseRetry(
         (attempt: number) => {
             return promiseFn(attempt);
         },
         {
-            forever: true,
+            retries: Infinity,
+            shouldRetry: shouldRetry ? ({ error }): boolean => shouldRetry(error) : undefined,
             factor: 2,
             minTimeout: 3000, // ms
             maxTimeout: 15000, // ms
@@ -670,7 +683,7 @@ export function recursivelyAssign<T1 extends T2, T2 extends Record<string, any>>
             continue;
         }
     }
-    return target as T1 & T2;
+    return target;
 }
 
 function getContentTimestampWithFallback(event: MatrixEvent): number {
@@ -728,7 +741,7 @@ export function recursiveMapToObject(map: Map<any, any>): Record<any, any> {
     return Object.fromEntries(targetMap.entries());
 }
 
-export function unsafeProp<K extends keyof any | undefined>(prop: K): boolean {
+export function unsafeProp(prop: keyof any | undefined): boolean {
     return prop === "__proto__" || prop === "prototype" || prop === "constructor";
 }
 

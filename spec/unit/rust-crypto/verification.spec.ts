@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
-import { Mocked } from "jest-mock";
+import { type OtherUserIdentity, type OutgoingRequest } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type Mocked } from "vitest";
 
 import {
     isVerificationEvent,
@@ -23,14 +24,15 @@ import {
     verificationMethodIdentifierToMethod,
 } from "../../../src/rust-crypto/verification";
 import {
-    ShowSasCallbacks,
+    type ShowSasCallbacks,
     VerificationRequestEvent,
-    Verifier,
+    type Verifier,
     VerifierEvent,
 } from "../../../src/crypto-api/verification";
-import { OutgoingRequest, OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
-import { IDeviceKeys } from "../../../src/@types/crypto";
+import { type OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
+import { type IDeviceKeys } from "../../../src/@types/crypto";
 import { EventType, MatrixEvent, MsgType } from "../../../src";
+import { logger } from "../../../src/logger.ts";
 
 describe("VerificationRequest", () => {
     describe("pending", () => {
@@ -78,7 +80,7 @@ describe("VerificationRequest", () => {
 
         beforeEach(() => {
             inner = makeMockedInner();
-            machine = { getDevice: jest.fn() } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
+            machine = { getDevice: vi.fn() } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
             request = makeTestRequest(inner, machine);
         });
 
@@ -95,7 +97,7 @@ describe("VerificationRequest", () => {
         });
 
         it("raises an error if starting verification does not produce a verifier", async () => {
-            jest.spyOn(inner, "otherDeviceId", "get").mockReturnValue(new RustSdkCryptoJs.DeviceId("other_device"));
+            vi.spyOn(inner, "otherDeviceId", "get").mockReturnValue(new RustSdkCryptoJs.DeviceId("other_device"));
             machine.getDevice.mockResolvedValue({} as RustSdkCryptoJs.Device);
             await expect(request.startVerification("m.sas.v1")).rejects.toThrow(
                 "Still no verifier after startSas() call",
@@ -136,23 +138,28 @@ describe("VerificationRequest", () => {
             await bobOlmMachine.updateTrackedUsers([new RustSdkCryptoJs.UserId(aliceUserId)]);
 
             // Alice requests verification
-            const bobUserIdentity = await aliceOlmMachine.getIdentity(new RustSdkCryptoJs.UserId(bobUserId));
+            const bobUserIdentity = (await aliceOlmMachine.getIdentity(
+                new RustSdkCryptoJs.UserId(bobUserId),
+            )) as OtherUserIdentity;
 
             const roomId = new RustSdkCryptoJs.RoomId("!roomId:example.org");
             const methods = [verificationMethodIdentifierToMethod("m.sas.v1")];
-            const innerVerificationRequest = await bobUserIdentity.requestVerification(
+            const innerVerificationRequest = bobUserIdentity.requestVerification(
                 roomId,
                 new RustSdkCryptoJs.EventId("$m.key.verification.request"),
                 methods,
             );
             const aliceVerificationRequest = new RustVerificationRequest(
+                logger,
                 aliceOlmMachine,
                 innerVerificationRequest,
                 aliceRequestLoop as unknown as OutgoingRequestProcessor,
                 ["m.sas.v1"],
             );
 
-            const verificationRequestContent = JSON.parse(await bobUserIdentity.verificationRequestContent(methods));
+            const verificationRequestContent = JSON.parse(bobUserIdentity.verificationRequestContent(methods));
+            todoFixupVerificationRequestContent(verificationRequestContent);
+
             await bobOlmMachine.receiveVerificationEvent(
                 JSON.stringify({
                     type: "m.room.message",
@@ -173,6 +180,7 @@ describe("VerificationRequest", () => {
                 "$m.key.verification.request",
             )!;
             const bobVerificationRequest = new RustVerificationRequest(
+                logger,
                 bobOlmMachine,
                 bobInnerVerificationRequest,
                 bobRequestLoop as unknown as OutgoingRequestProcessor,
@@ -213,7 +221,10 @@ describe("VerificationRequest", () => {
             aliceVerifier.on(VerifierEvent.ShowSas, compareSas);
             bobVerifier.on(VerifierEvent.ShowSas, compareSas);
 
-            await Promise.all([aliceVerifier.verify(), await bobVerifier.verify()]);
+            await expect(Promise.all([aliceVerifier.verify(), bobVerifier.verify()])).resolves.toEqual([
+                undefined,
+                undefined,
+            ]);
         } finally {
             await aliceRequestLoop.stop();
             await bobRequestLoop.stop();
@@ -267,23 +278,28 @@ describe("VerificationRequest", () => {
             await bobOlmMachine.updateTrackedUsers([new RustSdkCryptoJs.UserId(aliceUserId)]);
 
             // Alice requests verification
-            const bobUserIdentity = await aliceOlmMachine.getIdentity(new RustSdkCryptoJs.UserId(bobUserId));
+            const bobUserIdentity = (await aliceOlmMachine.getIdentity(
+                new RustSdkCryptoJs.UserId(bobUserId),
+            )) as OtherUserIdentity;
 
             const roomId = new RustSdkCryptoJs.RoomId("!roomId:example.org");
             const methods = [verificationMethodIdentifierToMethod("m.sas.v1")];
-            const innerVerificationRequest = await bobUserIdentity.requestVerification(
+            const innerVerificationRequest = bobUserIdentity.requestVerification(
                 roomId,
                 new RustSdkCryptoJs.EventId("$m.key.verification.request"),
                 methods,
             );
             const aliceVerificationRequest = new RustVerificationRequest(
+                logger,
                 aliceOlmMachine,
                 innerVerificationRequest,
                 aliceRequestLoop as unknown as OutgoingRequestProcessor,
                 ["m.sas.v1"],
             );
 
-            const verificationRequestContent = JSON.parse(await bobUserIdentity.verificationRequestContent(methods));
+            const verificationRequestContent = JSON.parse(bobUserIdentity.verificationRequestContent(methods));
+            todoFixupVerificationRequestContent(verificationRequestContent);
+
             await bobOlmMachine.receiveVerificationEvent(
                 JSON.stringify({
                     type: "m.room.message",
@@ -304,6 +320,7 @@ describe("VerificationRequest", () => {
                 "$m.key.verification.request",
             )!;
             const bobVerificationRequest = new RustVerificationRequest(
+                logger,
                 bobOlmMachine,
                 bobInnerVerificationRequest,
                 bobRequestLoop as unknown as OutgoingRequestProcessor,
@@ -338,7 +355,10 @@ describe("VerificationRequest", () => {
             aliceVerifier.on(VerifierEvent.ShowSas, compareSas);
             bobVerifier.on(VerifierEvent.ShowSas, compareSas);
 
-            await Promise.all([aliceVerifier.verify(), await bobVerifier.verify()]);
+            await expect(Promise.all([aliceVerifier.verify(), bobVerifier.verify()])).resolves.toEqual([
+                undefined,
+                undefined,
+            ]);
         } finally {
             await aliceRequestLoop.stop();
             await bobRequestLoop.stop();
@@ -378,26 +398,31 @@ describe("VerificationRequest", () => {
             await bobOlmMachine.updateTrackedUsers([new RustSdkCryptoJs.UserId(aliceUserId)]);
 
             // Alice requests verification
-            const bobUserIdentity = await aliceOlmMachine.getIdentity(new RustSdkCryptoJs.UserId(bobUserId));
+            const bobUserIdentity = (await aliceOlmMachine.getIdentity(
+                new RustSdkCryptoJs.UserId(bobUserId),
+            )) as OtherUserIdentity;
 
             const roomId = new RustSdkCryptoJs.RoomId("!roomId:example.org");
             const methods = [
                 verificationMethodIdentifierToMethod("m.reciprocate.v1"),
                 verificationMethodIdentifierToMethod("m.qr_code.show.v1"),
             ];
-            const innerVerificationRequest = await bobUserIdentity.requestVerification(
+            const innerVerificationRequest = bobUserIdentity.requestVerification(
                 roomId,
                 new RustSdkCryptoJs.EventId("$m.key.verification.request"),
                 methods,
             );
             const aliceVerificationRequest = new RustVerificationRequest(
+                logger,
                 aliceOlmMachine,
                 innerVerificationRequest,
                 aliceRequestLoop as unknown as OutgoingRequestProcessor,
                 ["m.reciprocate.v1", "m.qr_code.show.v1"],
             );
 
-            const verificationRequestContent = JSON.parse(await bobUserIdentity.verificationRequestContent(methods));
+            const verificationRequestContent = JSON.parse(bobUserIdentity.verificationRequestContent(methods));
+            todoFixupVerificationRequestContent(verificationRequestContent);
+
             await bobOlmMachine.receiveVerificationEvent(
                 JSON.stringify({
                     type: "m.room.message",
@@ -418,6 +443,7 @@ describe("VerificationRequest", () => {
                 "$m.key.verification.request",
             )!;
             const bobVerificationRequest = new RustVerificationRequest(
+                logger,
                 bobOlmMachine,
                 bobInnerVerificationRequest,
                 bobRequestLoop as unknown as OutgoingRequestProcessor,
@@ -444,13 +470,25 @@ describe("VerificationRequest", () => {
                 showQrCodeCallbacks.confirm();
             });
 
-            await Promise.all([aliceVerifier.verify(), await bobVerifier.verify()]);
+            await expect(Promise.all([aliceVerifier.verify(), bobVerifier.verify()])).resolves.toEqual([
+                undefined,
+                undefined,
+            ]);
         } finally {
             await aliceRequestLoop.stop();
             await bobRequestLoop.stop();
         }
     });
 });
+
+/**
+ * Needed until https://github.com/matrix-org/matrix-rust-sdk/issues/5643 is fixed.
+ *
+ * Modify the content of the supplied content to include `msgtype: m.key.verification.request`.
+ */
+function todoFixupVerificationRequestContent(content: any) {
+    content.msgtype = "m.key.verification.request";
+}
 
 describe("isVerificationEvent", () => {
     it.each([
@@ -495,17 +533,17 @@ function makeTestRequest(
     inner ??= makeMockedInner();
     olmMachine ??= {} as RustSdkCryptoJs.OlmMachine;
     outgoingRequestProcessor ??= {} as OutgoingRequestProcessor;
-    return new RustVerificationRequest(olmMachine, inner, outgoingRequestProcessor, []);
+    return new RustVerificationRequest(logger, olmMachine, inner, outgoingRequestProcessor, []);
 }
 
 /** Mock up a rust-side VerificationRequest */
 function makeMockedInner(): Mocked<RustSdkCryptoJs.VerificationRequest> {
     return {
-        registerChangesCallback: jest.fn(),
-        startSas: jest.fn(),
-        phase: jest.fn().mockReturnValue(RustSdkCryptoJs.VerificationRequestPhase.Created),
-        isPassive: jest.fn().mockReturnValue(false),
-        timeRemainingMillis: jest.fn(),
+        registerChangesCallback: vi.fn(),
+        startSas: vi.fn(),
+        phase: vi.fn().mockReturnValue(RustSdkCryptoJs.VerificationRequestPhase.Created),
+        isPassive: vi.fn().mockReturnValue(false),
+        timeRemainingMillis: vi.fn(),
         get otherDeviceId() {
             return undefined;
         },
@@ -633,11 +671,12 @@ function makeRequestLoop(
     ): Promise<any> {
         const resp = (await customHandler?.(request)) ?? defaultHandler(request);
         if (!(request instanceof RustSdkCryptoJs.UploadSigningKeysRequest) && request.id) {
-            await ourOlmMachine.markRequestAsSent(request.id!, request.type, JSON.stringify(resp));
+            await ourOlmMachine.markRequestAsSent(request.id, request.type, JSON.stringify(resp));
         }
     }
 
     async function runLoop() {
+        // oxlint-disable-next-line no-unmodified-loop-condition
         while (!stopRequestLoop) {
             const requests = await ourOlmMachine.outgoingRequests();
             for (const request of requests) {

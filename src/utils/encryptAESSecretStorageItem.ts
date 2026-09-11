@@ -16,7 +16,7 @@
 
 import { decodeBase64, encodeBase64 } from "../base64.ts";
 import { deriveKeys } from "./internal/deriveKeys.ts";
-import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
+import { type AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
 
 /**
  * Encrypt a string as a secret storage item, using AES-CTR.
@@ -33,11 +33,11 @@ import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretSt
  */
 export default async function encryptAESSecretStorageItem(
     data: string,
-    key: Uint8Array,
+    key: Uint8Array<ArrayBuffer>,
     name: string,
     ivStr?: string,
 ): Promise<AESEncryptedSecretStoragePayload> {
-    let iv: Uint8Array;
+    let iv: Uint8Array<ArrayBuffer>;
     if (ivStr) {
         iv = decodeBase64(ivStr);
     } else {

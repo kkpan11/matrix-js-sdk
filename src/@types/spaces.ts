@@ -14,13 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IPublicRoomsChunkRoom } from "../client.ts";
-import { RoomType } from "./event.ts";
-import { IStrippedState } from "../sync-accumulator.ts";
+import { type IPublicRoomsChunkRoom } from "../client.ts";
+import { type RoomType } from "./event.ts";
+import { type IStrippedState } from "../sync-accumulator.ts";
 
 // Types relating to Rooms of type `m.space` and related APIs
 
-/* eslint-disable camelcase */
 export interface IHierarchyRelation extends IStrippedState {
     origin_server_ts: number;
     content: {
@@ -34,4 +33,3 @@ export interface IHierarchyRoom extends IPublicRoomsChunkRoom {
     room_type?: RoomType | string;
     children_state: IHierarchyRelation[];
 }
-/* eslint-enable camelcase */

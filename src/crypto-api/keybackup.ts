@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { ISigned } from "../@types/signed.ts";
-import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
-import { ImportRoomKeyProgressData } from "./index.ts";
+import { type ISigned } from "../@types/signed.ts";
+import { type AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
+import { type ImportRoomKeyProgressData } from "./index.ts";
 
 export interface Curve25519AuthData {
     public_key: string;
@@ -33,17 +33,24 @@ export interface Aes256AuthData {
 }
 
 /**
- * Information about a server-side key backup.
+ * Information about a new server-side key backup.
  *
- * Returned by [`GET /_matrix/client/v3/room_keys/version`](https://spec.matrix.org/v1.7/client-server-api/#get_matrixclientv3room_keysversion)
- * and hence {@link matrix.MatrixClient.getKeyBackupVersion}.
+ * The type of the request body for [`POST /_matrix/client/v3/room_keys/version`](https://spec.matrix.org/v1.19/client-server-api/#post_matrixclientv3room_keysversion).
  */
-export interface KeyBackupInfo {
+export interface NewKeyBackupInfo {
     algorithm: string;
     auth_data: ISigned & (Curve25519AuthData | Aes256AuthData);
-    count?: number;
-    etag?: string;
-    version?: string; // number contained within
+}
+
+/**
+ * Information about an existing server-side key backup.
+ *
+ * Returned by [`GET /_matrix/client/v3/room_keys/version`](https://spec.matrix.org/v1.7/client-server-api/#get_matrixclientv3room_keysversion).
+ */
+export interface KeyBackupInfo extends NewKeyBackupInfo {
+    count: number;
+    etag: string;
+    version: string; // number contained within
 }
 
 /**
@@ -77,7 +84,6 @@ export interface Curve25519SessionData {
     mac: string;
 }
 
-/* eslint-disable camelcase */
 export interface KeyBackupSession<T = Curve25519SessionData | AESEncryptedSecretStoragePayload> {
     first_message_index: number;
     forwarded_count: number;

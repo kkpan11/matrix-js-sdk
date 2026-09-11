@@ -16,11 +16,11 @@ limitations under the License.
 
 import { SDPStreamMetadataPurpose } from "./callEventTypes.ts";
 import { acquireContext, releaseContext } from "./audioContext.ts";
-import { MatrixClient } from "../client.ts";
-import { RoomMember } from "../models/room-member.ts";
+import { type MatrixClient } from "../client.ts";
+import { type RoomMember } from "../models/room-member.ts";
 import { logger } from "../logger.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
-import { CallEvent, CallState, MatrixCall } from "./call.ts";
+import { CallEvent, CallState, type MatrixCall } from "./call.ts";
 
 const POLLING_INTERVAL = 200; // ms
 export const SPEAKING_THRESHOLD = -60; // dB
@@ -84,7 +84,7 @@ export class CallFeed extends TypedEventEmitter<CallFeedEvent, EventHandlerMap> 
     private measuringVolumeActivity = false;
     private audioContext?: AudioContext;
     private analyser?: AnalyserNode;
-    private frequencyBinCount?: Float32Array;
+    private frequencyBinCount?: Float32Array<ArrayBuffer>;
     private speakingThreshold = SPEAKING_THRESHOLD;
     private speaking = false;
     private volumeLooperTimeout?: ReturnType<typeof setTimeout>;

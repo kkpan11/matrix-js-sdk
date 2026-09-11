@@ -5,7 +5,6 @@ import { ClientEvent, MatrixClient } from "../../src/matrix";
 import { MatrixScheduler } from "../../src/scheduler";
 import { MemoryStore } from "../../src/store/memory";
 import { MatrixError } from "../../src/http-api";
-import { IStore } from "../../src/store";
 import { KnownMembership } from "../../src/@types/membership";
 
 describe("MatrixClient opts", function () {
@@ -136,7 +135,7 @@ describe("MatrixClient opts", function () {
         beforeEach(function () {
             client = new MatrixClient({
                 fetchFn: httpBackend.fetchFn as typeof globalThis.fetch,
-                store: new MemoryStore() as IStore,
+                store: new MemoryStore(),
                 baseUrl: baseUrl,
                 userId: userId,
                 accessToken: accessToken,
@@ -159,7 +158,7 @@ describe("MatrixClient opts", function () {
 
             await expect(
                 Promise.all([client.sendTextMessage("!foo:bar", "a body", "txn1"), httpBackend.flush("/txn1", 1)]),
-            ).rejects.toThrow("MatrixError: [500] Unknown message");
+            ).rejects.toThrow("MatrixError: [500] Ruh roh");
         });
 
         it("shouldn't queue events", async () => {
@@ -203,6 +202,111 @@ describe("MatrixClient opts", function () {
             ]);
 
             expect(res.event_id).toEqual("foo");
+        });
+    });
+
+    describe("with opts.queryParams", function () {
+        let client: MatrixClient;
+        let httpBackend: HttpBackend;
+        const userId = "@rsb-tbg:localhost";
+
+        beforeEach(function () {
+            httpBackend = new HttpBackend();
+            client = new MatrixClient({
+                fetchFn: httpBackend.fetchFn as typeof globalThis.fetch,
+                store: new MemoryStore(),
+                baseUrl: baseUrl,
+                userId: userId,
+                accessToken: accessToken,
+                queryParams: { user_id: userId },
+            });
+        });
+
+        afterEach(function () {
+            client.stopClient();
+            httpBackend.verifyNoOutstandingExpectation();
+            return httpBackend.stop();
+        });
+
+        it("should include queryParams in matrix server requests", async () => {
+            const eventId = "$test:event";
+            httpBackend
+                .when("PUT", "/txn1")
+                .check((req) => {
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, {
+                    event_id: eventId,
+                });
+
+            const [res] = await Promise.all([
+                client.sendTextMessage("!foo:bar", "test message", "txn1"),
+                httpBackend.flush("/txn1", 1),
+            ]);
+
+            expect(res.event_id).toEqual(eventId);
+        });
+
+        it("should include queryParams in sync requests", async () => {
+            httpBackend
+                .when("GET", "/versions")
+                .check((req) => {
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, {});
+
+            httpBackend
+                .when("GET", "/pushrules")
+                .check((req) => {
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, {});
+
+            httpBackend
+                .when("POST", "/filter")
+                .check((req) => {
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, { filter_id: "foo" });
+
+            httpBackend
+                .when("GET", "/sync")
+                .check((req) => {
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, syncData);
+
+            client.startClient();
+            await httpBackend.flush("/versions", 1);
+            await httpBackend.flush("/pushrules", 1);
+            await httpBackend.flush("/filter", 1);
+            await Promise.all([httpBackend.flush("/sync", 1), utils.syncPromise(client)]);
+        });
+
+        it("should merge queryParams with request-specific params", async () => {
+            const eventId = "$test:event";
+            httpBackend
+                .when("PUT", "/txn1")
+                .check((req) => {
+                    // Should contain both global queryParams and request-specific params
+                    expect(req.path).toContain(`user_id=${encodeURIComponent(userId)}`);
+                    return true;
+                })
+                .respond(200, {
+                    event_id: eventId,
+                });
+
+            const [res] = await Promise.all([
+                client.sendTextMessage("!foo:bar", "test message", "txn1"),
+                httpBackend.flush("/txn1", 1),
+            ]);
+
+            expect(res.event_id).toEqual(eventId);
         });
     });
 });

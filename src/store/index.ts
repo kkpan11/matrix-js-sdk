@@ -14,17 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { EventType } from "../@types/event.ts";
-import { Room } from "../models/room.ts";
-import { User } from "../models/user.ts";
-import { IEvent, MatrixEvent } from "../models/event.ts";
-import { Filter } from "../filter.ts";
-import { RoomSummary } from "../models/room-summary.ts";
-import { IMinimalEvent, IRooms, ISyncResponse } from "../sync-accumulator.ts";
-import { IStartClientOpts } from "../client.ts";
-import { IStateEventWithRoomId } from "../@types/search.ts";
-import { IndexedToDeviceBatch, ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
-import { EventEmitterEvents } from "../models/typed-event-emitter.ts";
+import { type EventType } from "../@types/event.ts";
+import { type Room } from "../models/room.ts";
+import { type SyncUserProfile, type User } from "../models/user.ts";
+import { type IEvent, type MatrixEvent } from "../models/event.ts";
+import { type Filter } from "../filter.ts";
+import { type RoomSummary } from "../models/room-summary.ts";
+import { type IMinimalEvent, type IRooms, type ISyncResponse } from "../sync-accumulator.ts";
+import { type IStartClientOpts } from "../client.ts";
+import { type IStateEventWithRoomId } from "../@types/search.ts";
+import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
+import { type EventEmitterEvents } from "../models/typed-event-emitter.ts";
 
 export interface ISavedSync {
     nextBatch: string;
@@ -253,6 +253,33 @@ export interface IStore {
      * Removes a specific batch of to-device messages from the queue
      */
     removeToDeviceBatch(id: number): Promise<void>;
+
+    /**
+     * Store user profile details from a sync. Existing profiles will be overwritten.
+     * @param userProfiles - A map of userIds to profiles.
+     */
+    storeUserProfiles(userProfiles: Map<string, SyncUserProfile>): Promise<void>;
+
+    /**
+     * Delete stored profiles for the given users.
+     * @param userIds - The user IDs whose profiles should be deleted.
+     */
+    removeUserProfiles(userIds: string[]): Promise<void>;
+
+    /**
+     * Retrieve a stored user profile for the given user ID, if it exists.
+     * @param userId - The user ID to retrieve the profile for.
+     * @returns The stored profile, or undefined if no profile is stored for this user ID.
+     */
+    getUserProfile(userId: string): Promise<SyncUserProfile | undefined>;
+
+    /**
+     * Remove all stored events matching the given IDs from the stored accumulated
+     * sync.
+     * @param roomId The target room.
+     * @param eventIds IDs of events to remove.
+     */
+    removeEventsFromRoom(roomId: string, eventIds: string[]): Promise<void>;
 
     /**
      * Stop the store and perform any appropriate cleanup

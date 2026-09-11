@@ -16,18 +16,18 @@ limitations under the License.
 
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 
-import { Logger } from "../logger.ts";
-import { CryptoStore, MigrationState, SecretStorePrivateKeys } from "../crypto/store/base.ts";
+import { type Logger } from "../logger.ts";
+import { type CryptoStore, MigrationState, type SecretStorePrivateKeys } from "../crypto/store/base.ts";
 import { IndexedDBCryptoStore } from "../crypto/store/indexeddb-crypto-store.ts";
-import { IHttpOpts, MatrixHttpApi } from "../http-api/index.ts";
+import { type IHttpOpts, type MatrixHttpApi } from "../http-api/index.ts";
 import { requestKeyBackupVersion } from "./backup.ts";
-import { CrossSigningKeyInfo, Curve25519AuthData } from "../crypto-api/index.ts";
-import { RustCrypto } from "./rust-crypto.ts";
-import { KeyBackupInfo } from "../crypto-api/keybackup.ts";
+import { type CrossSigningKeyInfo, type Curve25519AuthData } from "../crypto-api/index.ts";
+import { type RustCrypto } from "./rust-crypto.ts";
+import { type KeyBackupInfo } from "../crypto-api/keybackup.ts";
 import { sleep } from "../utils.ts";
 import { encodeBase64 } from "../base64.ts";
 import decryptAESSecretStorageItem from "../utils/decryptAESSecretStorageItem.ts";
-import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
+import { type AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
 
 interface LegacyRoomEncryption {
     algorithm: string;
@@ -80,9 +80,6 @@ export async function migrateFromLegacyCrypto(args: {
     // initialise the rust matrix-sdk-crypto-wasm, if it hasn't already been done
     await RustSdkCryptoJs.initAsync();
 
-    // enable tracing in the rust-sdk
-    new RustSdkCryptoJs.Tracing(RustSdkCryptoJs.LoggerLevel.Debug).turnOn();
-
     if (!(await legacyStore.containsData())) {
         // This store was never used. Nothing to migrate.
         return;
@@ -123,7 +120,7 @@ export async function migrateFromLegacyCrypto(args: {
     }
     onProgress(0);
 
-    const pickleKey = new TextEncoder().encode(args.legacyPickleKey);
+    const pickleKey = new TextEncoder().encode(args.legacyPickleKey).slice();
 
     if (migrationState === MigrationState.NOT_STARTED) {
         logger.info("Migrating data from legacy crypto store. Step 1: base data");
@@ -164,7 +161,7 @@ async function migrateBaseData(
     userId: string,
     deviceId: string,
     legacyStore: CryptoStore,
-    pickleKey: Uint8Array,
+    pickleKey: Uint8Array<ArrayBuffer>,
     storeHandle: RustSdkCryptoJs.StoreHandle,
     logger: Logger,
 ): Promise<void> {
@@ -230,7 +227,7 @@ async function migrateBaseData(
         pickleKey,
         "user_signing",
     );
-    await RustSdkCryptoJs.Migration.migrateBaseData(migrationData, pickleKey, storeHandle);
+    await RustSdkCryptoJs.Migration.migrateBaseData(migrationData, pickleKey, storeHandle, logger);
 }
 
 async function countOlmSessions(logger: Logger, legacyStore: CryptoStore): Promise<number> {
@@ -254,7 +251,6 @@ async function migrateOlmSessions(
     storeHandle: RustSdkCryptoJs.StoreHandle,
     onBatchDone: (batchSize: number) => void,
 ): Promise<void> {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
         const batch = await legacyStore.getEndToEndSessionsBatch();
         if (batch === null) return;
@@ -269,7 +265,7 @@ async function migrateOlmSessions(
             migrationData.push(pickledSession);
         }
 
-        await RustSdkCryptoJs.Migration.migrateOlmSessions(migrationData, pickleKey, storeHandle);
+        await RustSdkCryptoJs.Migration.migrateOlmSessions(migrationData, pickleKey, storeHandle, logger);
         await legacyStore.deleteEndToEndSessionsBatch(batch);
         onBatchDone(batch.length);
     }
@@ -282,7 +278,6 @@ async function migrateMegolmSessions(
     storeHandle: RustSdkCryptoJs.StoreHandle,
     onBatchDone: (batchSize: number) => void,
 ): Promise<void> {
-    // eslint-disable-next-line no-constant-condition
     while (true) {
         const batch = await legacyStore.getEndToEndInboundGroupSessionsBatch();
         if (batch === null) return;
@@ -343,7 +338,7 @@ async function migrateMegolmSessions(
             migrationData.push(pickledSession);
         }
 
-        await RustSdkCryptoJs.Migration.migrateMegolmSessions(migrationData, pickleKey, storeHandle);
+        await RustSdkCryptoJs.Migration.migrateMegolmSessions(migrationData, pickleKey, storeHandle, logger);
         await legacyStore.deleteEndToEndInboundGroupSessionsBatch(batch);
         onBatchDone(batch.length);
     }
@@ -417,7 +412,7 @@ export async function migrateRoomSettingsFromLegacyCrypto({
 
 async function getAndDecryptCachedSecretKey(
     legacyStore: CryptoStore,
-    legacyPickleKey: Uint8Array,
+    legacyPickleKey: Uint8Array<ArrayBuffer>,
     name: string,
 ): Promise<string | undefined> {
     const key = await new Promise<any>((resolve) => {
@@ -492,7 +487,7 @@ export async function migrateLegacyLocalTrustIfNeeded(args: {
     if (rustSeenMSK && rustSeenMSK == legacyLocallyTrustedMSK) {
         logger.info(`Post Migration: Migrating legacy trusted MSK: ${legacyLocallyTrustedMSK} to locally verified.`);
         // Let's mark the user identity as locally verified as part of the migration.
-        await rustOwnIdentity!.verify();
+        await rustOwnIdentity.verify();
         // As well as marking the MSK as trusted, `OlmMachine.verify` returns a
         // `SignatureUploadRequest` which will publish a signature of the MSK using
         // this device. In this case, we ignore the request: since the user hasn't

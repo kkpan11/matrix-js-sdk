@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { RoomType } from "./event.ts";
-import { GuestAccess, HistoryVisibility, JoinRule, RestrictedAllowType } from "./partials.ts";
-import { ImageInfo } from "./media.ts";
-import { PolicyRecommendation } from "../models/invites-ignorer.ts";
+import { type RoomType } from "./event.ts";
+import { type GuestAccess, type HistoryVisibility, type JoinRule, type RestrictedAllowType } from "./partials.ts";
+import { type ImageInfo } from "./media.ts";
+import { type PolicyRecommendation } from "../models/invites-ignorer.ts";
 
 export interface RoomCanonicalAliasEventContent {
     alias?: string;
@@ -90,7 +90,7 @@ export interface RoomNameEventContent {
 }
 
 export interface RoomTopicEventContent {
-    topic: string;
+    topic: string | undefined | null;
 }
 
 export interface RoomAvatarEventContent {
@@ -105,9 +105,10 @@ export interface RoomPinnedEventsEventContent {
 }
 
 export interface RoomEncryptionEventContent {
-    algorithm: "m.megolm.v1.aes-sha2";
-    rotation_period_ms?: number;
-    rotation_period_msgs?: number;
+    "algorithm": "m.megolm.v1.aes-sha2";
+    "io.element.msc4362.encrypt_state_events"?: boolean;
+    "rotation_period_ms"?: number;
+    "rotation_period_msgs"?: number;
 }
 
 export interface RoomHistoryVisibilityEventContent {
@@ -144,4 +145,9 @@ export interface PolicyRuleEventContent {
     entity: string;
     reason: string;
     recommendation: PolicyRecommendation;
+}
+
+export interface RoomPolicyContent {
+    via: string;
+    public_key: string;
 }

@@ -14,65 +14,103 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MatrixError } from "./errors.ts";
-import { Logger } from "../logger.ts";
+import { type MatrixError } from "./errors.ts";
+import { type Logger } from "../logger.ts";
+import { type QueryDict } from "../utils.ts";
+import { type ValidatedAuthMetadata } from "../oauth/discover.ts";
 
 export type Body = Record<string, any> | BodyInit;
 
 /**
- * @experimental
  * Unencrypted access and (optional) refresh token
  */
 export type AccessTokens = {
+    /**
+     * The new access token to use for authenticated requests
+     */
     accessToken: string;
+    /**
+     * The new refresh token to use for refreshing tokens, optional
+     */
     refreshToken?: string;
+    /**
+     * Approximate date when the access token will expire, optional
+     */
+    expiry?: Date;
 };
+
 /**
- * @experimental
- * Function that performs token refresh using the given refreshToken.
- * Returns a promise that resolves to the refreshed access and (optional) refresh tokens.
- *
- * Can be passed to HttpApi instance as {@link IHttpOpts.tokenRefreshFunction} during client creation {@link ICreateClientOpts}
+ * A callback function called when tokens are refreshed such that stored tokens can be updated with
+ * the refreshed ones.
  */
-export type TokenRefreshFunction = (refreshToken: string) => Promise<AccessTokens>;
+export type TokenRefreshCallback = (newTokens: AccessTokens) => void;
+
+/**
+ * Configuration required for {@link IHttpOpts} to allow the SDK to manage the full lifecycle of tokens for an
+ * OAuth2-native session (as per MSC2965/MSC3861): discovering the delegated auth server's metadata, refreshing
+ * access/refresh tokens, and revoking them (e.g. on logout).
+ *
+ * The SDK constructs the underlying OAuth2 client itself, lazily, the first time it is actually needed (so that,
+ * for example, a client started with no network connection does not fail to ever set up token refresh).
+ */
+export interface OAuth2ClientConfig {
+    /** The OAuth2 client ID this application is registered with the delegated auth server under. */
+    clientId: string;
+    /** The device ID of the current session, used to scope refreshed/revoked tokens to this session. */
+    deviceId?: string;
+}
+
+/** Options object for `FetchHttpApi` and {@link MatrixHttpApi}. */
 export interface IHttpOpts {
     fetchFn?: typeof globalThis.fetch;
 
     baseUrl: string;
     idBaseUrl?: string;
     prefix: string;
-    extraParams?: Record<string, string>;
+    extraParams?: QueryDict;
 
     accessToken?: string;
     /**
-     * Used in conjunction with tokenRefreshFunction to attempt token refresh
+     * Used in conjunction with oauth2ClientConfig to attempt token refresh
      */
     refreshToken?: string;
     /**
-     * Function to attempt token refresh when a possibly expired token is encountered
-     * Optional, only called when a refreshToken is present
+     * Callback called when tokens are refreshed. Must be supplied if refreshToken is supplied.
      */
-    tokenRefreshFunction?: TokenRefreshFunction;
+    onTokenRefresh?: TokenRefreshCallback;
+    /**
+     * Configuration needed to refresh (given refreshToken) and revoke (e.g. on logout) tokens for an
+     * OAuth2-native session. Optional; if omitted, tokens will not be refreshed or revoked by the SDK.
+     * authMetadataCallback must also be supplied to refresh tokens.
+     */
+    oauth2ClientConfig?: OAuth2ClientConfig;
+
+    /**
+     * Discovers and validates the delegated auth server's metadata for the current homeserver.
+     * Must be supplied along with oauth2ClientConfig in order to refresh tokens.
+     *
+     * @returns validated authentication metadata
+     * @throws when delegated auth config is invalid or unreachable
+     */
+    authMetadataCallback?: () => Promise<ValidatedAuthMetadata>;
+
+    /**
+     * Whether to use the HTTP Authorization header over the `access_token` query parameter
+     * @deprecated as of v1.11 in https://spec.matrix.org/v1.17/client-server-api/#using-access-tokens
+     */
     useAuthorizationHeader?: boolean; // defaults to true
 
+    /** For historical reasons, must be set to `true`. Will eventually be removed. */
     onlyData?: boolean;
+
     localTimeoutMs?: number;
 
     /** Optional logger instance. If provided, requests and responses will be logged. */
     logger?: Logger;
 }
 
-export interface IRequestOpts extends Pick<RequestInit, "priority"> {
-    /**
-     * The alternative base url to use.
-     * If not specified, uses this.opts.baseUrl
-     */
-    baseUrl?: string;
-    /**
-     * The full prefix to use e.g.
-     * "/_matrix/client/v2_alpha". If not specified, uses this.opts.prefix.
-     */
-    prefix?: string;
+/** Options object for `FetchHttpApi.requestOtherUrl`. */
+export interface BaseRequestOpts extends Pick<RequestInit, "priority"> {
     /**
      * map of additional request headers
      */
@@ -84,21 +122,51 @@ export interface IRequestOpts extends Pick<RequestInit, "priority"> {
      */
     localTimeoutMs?: number;
     keepAlive?: boolean; // defaults to false
-    json?: boolean; // defaults to true
+
+    /**
+     * By default, we will:
+     *
+     *  *  If the `body` is an object, JSON-encode it and set `Content-Type: application/json` in the
+     *     request headers (unless overridden by {@link headers}).
+     *
+     *  * Set `Accept: application/json` in the request headers (again, unless overridden by {@link headers}).
+     *
+     *  * Parse the response as JSON and return the parsed response.
+     *
+     * Setting this to `false` inhibits all three behaviors, and the response is instead parsed as a UTF-8 string. It
+     * defaults to `true`, unless {@link rawResponseBody} is set.
+     *
+     * @deprecated Instead of setting this to `false`, set {@link rawResponseBody} to `true`.
+     */
+    json?: boolean;
+
+    /**
+     * Setting this to `true` does two things:
+     *
+     *  * Inhibits the automatic addition of `Accept: application/json` in the request headers.
+     *
+     *  * Causes the raw response to be returned as a {@link https://developer.mozilla.org/en-US/docs/Web/API/Blob|Blob}
+     *    instead of parsing it as JSON.
+     */
+    rawResponseBody?: boolean;
+}
+
+export interface IRequestOpts extends BaseRequestOpts {
+    /**
+     * The alternative base url to use.
+     * If not specified, uses this.opts.baseUrl
+     */
+    baseUrl?: string;
+    /**
+     * The full prefix to use e.g.
+     * "/_matrix/client/v2_alpha". If not specified, uses this.opts.prefix.
+     */
+    prefix?: string;
 
     // Set to true to prevent the request function from emitting a Session.logged_out event.
     // This is intended for use on endpoints where M_UNKNOWN_TOKEN is a valid/notable error response,
     // such as with token refreshes.
     inhibitLogoutEmit?: boolean;
-}
-
-export interface IContentUri {
-    base: string;
-    path: string;
-    params: {
-        // eslint-disable-next-line camelcase
-        access_token: string;
-    };
 }
 
 export enum HttpApiEvent {
@@ -171,7 +239,6 @@ export interface Upload {
 }
 
 export interface UploadResponse {
-    // eslint-disable-next-line camelcase
     content_uri: string;
 }
 

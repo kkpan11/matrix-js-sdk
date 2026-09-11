@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { RelationType } from "./@types/event.ts";
-import { MatrixEvent } from "./models/event.ts";
+import { type RelationType } from "./@types/event.ts";
+import { type MatrixEvent } from "./models/event.ts";
 import { FILTER_RELATED_BY_REL_TYPES, FILTER_RELATED_BY_SENDERS, THREAD_RELATION_TYPE } from "./models/thread.ts";
 
 /**
@@ -34,7 +34,6 @@ function matchesWildcard(actualValue: string, filterValue: string): boolean {
     }
 }
 
-/* eslint-disable camelcase */
 export interface IFilterComponent {
     "types"?: string[];
     "not_types"?: string[];
@@ -51,7 +50,6 @@ export interface IFilterComponent {
     "io.element.relation_senders"?: Array<RelationType | string>;
     "io.element.relation_types"?: string[];
 }
-/* eslint-enable camelcase */
 
 /**
  * FilterComponent is a section of a Filter definition which defines the
@@ -99,17 +97,19 @@ export class FilterComponent {
      * Converts the filter component into the form expected over the wire
      */
     public toJSON(): object {
-        return {
-            types: this.filterJson.types || null,
-            not_types: this.filterJson.not_types || [],
-            rooms: this.filterJson.rooms || null,
-            not_rooms: this.filterJson.not_rooms || [],
-            senders: this.filterJson.senders || null,
-            not_senders: this.filterJson.not_senders || [],
-            contains_url: this.filterJson.contains_url || null,
-            [FILTER_RELATED_BY_SENDERS.name]: this.filterJson[FILTER_RELATED_BY_SENDERS.name] || [],
-            [FILTER_RELATED_BY_REL_TYPES.name]: this.filterJson[FILTER_RELATED_BY_REL_TYPES.name] || [],
-        };
+        return Object.fromEntries(
+            Object.entries({
+                types: this.filterJson.types,
+                not_types: this.filterJson.not_types,
+                rooms: this.filterJson.rooms,
+                not_rooms: this.filterJson.not_rooms,
+                senders: this.filterJson.senders,
+                not_senders: this.filterJson.not_senders,
+                contains_url: this.filterJson.contains_url,
+                [FILTER_RELATED_BY_SENDERS.name]: this.filterJson[FILTER_RELATED_BY_SENDERS.name],
+                [FILTER_RELATED_BY_REL_TYPES.name]: this.filterJson[FILTER_RELATED_BY_REL_TYPES.name],
+            }).filter(([_key, value]) => value),
+        );
     }
 
     /**
@@ -142,6 +142,7 @@ export class FilterComponent {
             },
         } as const;
 
+        // oxlint-disable-next-line guard-for-in
         for (const name in literalKeys) {
             const matchFunc = literalKeys[<keyof typeof literalKeys>name];
             const notName = "not_" + name;
@@ -193,6 +194,7 @@ export class FilterComponent {
      * @returns events which matched the filter component
      */
     public filter(events: MatrixEvent[]): MatrixEvent[] {
+        // oxlint-disable-next-line typescript/unbound-method
         return events.filter(this.check, this);
     }
 

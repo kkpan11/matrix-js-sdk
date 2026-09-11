@@ -16,13 +16,13 @@ limitations under the License.
 
 import { getHttpUriForMxc } from "../content-repo.ts";
 import { removeDirectionOverrideChars, removeHiddenChars } from "../utils.ts";
-import { User } from "./user.ts";
-import { MatrixEvent } from "./event.ts";
-import { RoomState } from "./room-state.ts";
+import { type User } from "./user.ts";
+import { type MatrixEvent } from "./event.ts";
+import { type RoomState } from "./room-state.ts";
 import { logger } from "../logger.ts";
 import { TypedEventEmitter } from "./typed-event-emitter.ts";
 import { EventType } from "../@types/event.ts";
-import { KnownMembership, Membership } from "../@types/membership.ts";
+import { KnownMembership, type Membership } from "../@types/membership.ts";
 
 export enum RoomMemberEvent {
     Membership = "RoomMember.membership",
@@ -66,7 +66,6 @@ export type RoomMemberEventHandlerMap = {
      * ```
      * matrixClient.on("RoomMember.powerLevel", function(event, member){
      *   var newPowerLevel = member.powerLevel;
-     *   var newNormPowerLevel = member.powerLevelNorm;
      * });
      * ```
      */
@@ -95,24 +94,27 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
      * True if the room member is currently typing.
      */
     public typing = false;
+
     /**
-     * The human-readable name for this room member. This will be
+     * The human-readable name for this room member. Similar to {@link rawDisplayName}, but
      * disambiguated with a suffix of " (\@user_id:matrix.org)" if another member shares the
      * same displayname.
      */
     public name: string;
+
     /**
-     * The ambiguous displayname of this room member.
+     * The ambiguous displayname of this room member, with some preprocessing:
+     *
+     *  * Direction override characters (RTO and LRO) are removed.
+     *  * If the displayname is empty, or contains only blank, non-printing, or diacritcic characters, it is
+     *    replaced with the user ID.
      */
     public rawDisplayName: string;
+
     /**
      * The power level for this room member.
      */
     public powerLevel = 0;
-    /**
-     * The normalised power level (0-100) for this room member.
-     */
-    public powerLevelNorm = 0;
     /**
      * The User object for this room member, if one exists.
      */
@@ -226,43 +228,54 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
     }
 
     /**
-     * Update this room member's power level event. May fire
-     * "RoomMember.powerLevel" if this event updates this member's power levels.
-     * @param powerLevelEvent - The `m.room.power_levels` event
+     * Recalculate the disambiguation flag for this member based on current room state.
+     * This should be called when another member's display name changes and may affect
+     * whether this member needs disambiguation.
+     *
+     * @param roomState - The current room state to use for disambiguation check
+     * @returns true if the member's name changed as a result of the disambiguation update
+     *
+     * @remarks
+     * Fires {@link RoomMemberEvent.Name}
+     */
+    public recalculateDisambiguatedName(roomState: RoomState): boolean {
+        if (!this.events.member) {
+            return false;
+        }
+
+        const displayName = this.events.member.getDirectionalContent().displayname ?? "";
+        const newDisambiguate = shouldDisambiguate(this.userId, displayName, roomState);
+
+        if (newDisambiguate === this.disambiguate) {
+            return false;
+        }
+
+        this.disambiguate = newDisambiguate;
+        const oldName = this.name;
+        this.name = calculateDisplayName(this.userId, displayName, this.disambiguate);
+
+        if (oldName !== this.name) {
+            this.updateModifiedTime();
+            this.emit(RoomMemberEvent.Name, this.events.member, this, oldName);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Update this room member's power level event. Will fire
+     * "RoomMember.powerLevel" if the new power level is different
+     * @param powerLevel - The power level of the room member.
      *
      * @remarks
      * Fires {@link RoomMemberEvent.PowerLevel}
      */
-    public setPowerLevelEvent(powerLevelEvent: MatrixEvent): void {
-        if (powerLevelEvent.getType() !== EventType.RoomPowerLevels || powerLevelEvent.getStateKey() !== "") {
-            return;
-        }
-
-        const evContent = powerLevelEvent.getDirectionalContent();
-
-        let maxLevel = evContent.users_default || 0;
-        const users: { [userId: string]: number } = evContent.users || {};
-        Object.values(users).forEach((lvl: number) => {
-            maxLevel = Math.max(maxLevel, lvl);
-        });
+    public setPowerLevel(powerLevel: number, powerLevelEvent: MatrixEvent): void {
         const oldPowerLevel = this.powerLevel;
-        const oldPowerLevelNorm = this.powerLevelNorm;
+        this.powerLevel = powerLevel;
 
-        if (users[this.userId] !== undefined && Number.isInteger(users[this.userId])) {
-            this.powerLevel = users[this.userId];
-        } else if (evContent.users_default !== undefined) {
-            this.powerLevel = evContent.users_default;
-        } else {
-            this.powerLevel = 0;
-        }
-        this.powerLevelNorm = 0;
-        if (maxLevel > 0) {
-            this.powerLevelNorm = (this.powerLevel * 100) / maxLevel;
-        }
-
-        // emit for changes in powerLevelNorm as well (since the app will need to
-        // redraw everyone's level if the max has changed)
-        if (oldPowerLevel !== this.powerLevel || oldPowerLevelNorm !== this.powerLevelNorm) {
+        if (oldPowerLevel !== this.powerLevel) {
             this.updateModifiedTime();
             this.emit(RoomMemberEvent.PowerLevel, powerLevelEvent, this);
         }
@@ -368,6 +381,11 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
      * If false, any non-matrix content URLs will be ignored. Setting this option to
      * true will expose URLs that, if fetched, will leak information about the user
      * to anyone who they share a room with.
+     * @param useAuthentication - (optional) If true, the caller supports authenticated
+     * media and wants an authentication-required URL. Note that server support for
+     * authenticated media will not be checked - it is the caller's responsibility
+     * to do so before calling this function. Note also that useAuthentication
+     * implies allowRedirects. Defaults to false (unauthenticated endpoints).
      * @returns the avatar URL or null.
      */
     public getAvatarUrl(
@@ -377,13 +395,23 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
         resizeMethod: string,
         allowDefault = true,
         allowDirectLinks: boolean,
+        useAuthentication: boolean = false,
     ): string | null {
         const rawUrl = this.getMxcAvatarUrl();
 
         if (!rawUrl && !allowDefault) {
             return null;
         }
-        const httpUrl = getHttpUriForMxc(baseUrl, rawUrl, width, height, resizeMethod, allowDirectLinks);
+        const httpUrl = getHttpUriForMxc(
+            baseUrl,
+            rawUrl,
+            width,
+            height,
+            resizeMethod,
+            allowDirectLinks,
+            undefined,
+            useAuthentication,
+        );
         if (httpUrl) {
             return httpUrl;
         }
@@ -403,7 +431,7 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
     }
 }
 
-const MXID_PATTERN = /@.+:.+/;
+export const MXID_PATTERN = /@.+:.+/;
 const LTR_RTL_PATTERN = /[\u200E\u200F\u202A-\u202F]/;
 
 function shouldDisambiguate(selfUserId: string, displayName?: string, roomState?: RoomState): boolean {

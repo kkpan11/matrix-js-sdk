@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 import { CallFeedStatsReporter } from "../../../../src/webrtc/stats/callFeedStatsReporter";
-import { CallFeedReport } from "../../../../src/webrtc/stats/statsReport";
-import { CallFeed } from "../../../../src/webrtc/callFeed";
+import { type CallFeedReport } from "../../../../src/webrtc/stats/statsReport";
+import { type CallFeed } from "../../../../src/webrtc/callFeed";
 
 const CALL_ID = "CALL_ID";
 const USER_ID = "USER_ID";
@@ -23,7 +23,7 @@ describe("CallFeedStatsReporter", () => {
     let rtcSpy: RTCPeerConnection;
     beforeEach(() => {
         rtcSpy = {} as RTCPeerConnection;
-        rtcSpy.getTransceivers = jest.fn().mockReturnValue(buildTransceiverMocks());
+        rtcSpy.getTransceivers = vi.fn().mockReturnValue(buildTransceiverMocks());
     });
 
     describe("should", () => {

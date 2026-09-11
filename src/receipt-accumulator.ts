@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IMinimalEvent } from "./sync-accumulator.ts";
+import { type IMinimalEvent } from "./sync-accumulator.ts";
 import { EventType } from "./@types/event.ts";
 import { isSupportedReceiptType, MapWithDefault, recursiveMapToObject } from "./utils.ts";
-import { IContent } from "./models/event.ts";
-import { ReceiptContent, ReceiptType } from "./@types/read_receipts.ts";
+import { type ReceiptContent, type ReceiptType } from "./@types/read_receipts.ts";
 
 interface AccumulatedReceipt {
     data: IMinimalEvent;
@@ -65,6 +64,7 @@ export class ReceiptAccumulator {
     /**
      * @returns an iterator of pairs of [userId, AccumulatedReceipt] - all the
      *          most recently-received unthreaded receipts for each user.
+     * @yields pairs of [userId, AccumulatedReceipt]
      */
     private allUnthreaded(): IterableIterator<[string, AccumulatedReceipt]> {
         return this.unthreadedReadReceipts.entries();
@@ -74,6 +74,7 @@ export class ReceiptAccumulator {
      * @returns an iterator of pairs of [userId, AccumulatedReceipt] - all the
      *          most recently-received threaded receipts for each user, in all
      *          threads.
+     * @yields pairs of [userId, AccumulatedReceipt]
      */
     private *allThreaded(): IterableIterator<[string, AccumulatedReceipt]> {
         for (const receiptsForThread of this.threadedReadReceipts.values()) {
@@ -160,7 +161,7 @@ export class ReceiptAccumulator {
             room_id: roomId,
             content: {
                 // $event_id: { "m.read": { $user_id: $json } }
-            } as IContent,
+            },
         };
 
         const receiptEventContent: MapWithDefault<

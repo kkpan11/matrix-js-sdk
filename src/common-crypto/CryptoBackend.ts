@@ -14,14 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import type { IDeviceLists, IToDeviceEvent } from "../sync-accumulator.ts";
-import { IClearEvent, MatrixEvent } from "../models/event.ts";
-import { Room } from "../models/room.ts";
-import { CryptoApi, DecryptionFailureCode, ImportRoomKeysOpts } from "../crypto-api/index.ts";
-import { CrossSigningInfo, UserTrustLevel } from "../crypto/CrossSigning.ts";
-import { IEncryptedEventInfo } from "../crypto/api.ts";
-import { KeyBackupInfo, KeyBackupSession } from "../crypto-api/keybackup.ts";
-import { IMegolmSessionData } from "../@types/crypto.ts";
+import type { IDeviceLists, IToDeviceEvent, ReceivedToDeviceMessage } from "../sync-accumulator.ts";
+import { type IClearEvent, type MatrixEvent } from "../models/event.ts";
+import { type Room } from "../models/room.ts";
+import { type CryptoApi, type DecryptionFailureCode, type ImportRoomKeysOpts } from "../crypto-api/index.ts";
+import { type KeyBackupInfo, type KeyBackupSession } from "../crypto-api/keybackup.ts";
+import { type IMegolmSessionData } from "../@types/crypto.ts";
 
 /**
  * Common interface for the crypto implementations
@@ -46,15 +44,6 @@ export interface CryptoBackend extends SyncCryptoCallbacks, CryptoApi {
     stop(): void;
 
     /**
-     * Get the verification level for a given user
-     *
-     * @param userId - user to be checked
-     *
-     * @deprecated Superceded by {@link CryptoApi#getUserVerificationStatus}.
-     */
-    checkUserTrust(userId: string): UserTrustLevel;
-
-    /**
      * Encrypt an event according to the configuration of the room.
      *
      * @param event -  event to be sent
@@ -75,35 +64,6 @@ export interface CryptoBackend extends SyncCryptoCallbacks, CryptoApi {
     decryptEvent(event: MatrixEvent): Promise<EventDecryptionResult>;
 
     /**
-     * Get information about the encryption of an event
-     *
-     * @param event - event to be checked
-     * @deprecated Use {@link CryptoApi#getEncryptionInfoForEvent} instead
-     */
-    getEventEncryptionInfo(event: MatrixEvent): IEncryptedEventInfo;
-
-    /**
-     * Get the cross signing information for a given user.
-     *
-     * The cross-signing API is currently UNSTABLE and may change without notice.
-     *
-     * @param userId - the user ID to get the cross-signing info for.
-     *
-     * @returns the cross signing information for the user.
-     * @deprecated Prefer {@link CryptoApi#userHasCrossSigningKeys}
-     */
-    getStoredCrossSigningForUser(userId: string): CrossSigningInfo | null;
-
-    /**
-     * Check the cross signing trust of the current user
-     *
-     * @param opts - Options object.
-     *
-     * @deprecated Unneeded for the new crypto
-     */
-    checkOwnCrossSigningTrust(opts?: CheckOwnCrossSigningTrustOpts): Promise<void>;
-
-    /**
      * Get a backup decryptor capable of decrypting megolm session data encrypted with the given backup information.
      * @param backupInfo - The backup information
      * @param privKey - The private decryption key.
@@ -119,6 +79,78 @@ export interface CryptoBackend extends SyncCryptoCallbacks, CryptoApi {
      * @returns a promise which resolves once the keys have been imported
      */
     importBackedUpRoomKeys(keys: IMegolmSessionData[], backupVersion: string, opts?: ImportRoomKeysOpts): Promise<void>;
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //
+    // Room key history sharing (MSC4268)
+    //
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Share any shareable E2EE history in the given room with the given recipient,
+     * as per [MSC4268](https://github.com/matrix-org/matrix-spec-proposals/pull/4268)
+     */
+    shareRoomHistoryWithUser(roomId: string, userId: string): Promise<void>;
+
+    /**
+     * Having accepted an invite for the given room from the given user, attempt to
+     * find information about a room key bundle and, if found, download the
+     * bundle and import the room keys, as per {@link https://github.com/matrix-org/matrix-spec-proposals/pull/4268|MSC4268}.
+     *
+     * @param roomId - The room we were invited to, for which we want to check if a room
+     *   key bundle was received.
+     *
+     * @param inviter - The user who invited us to the room and is expected to have
+     *   sent the room key bundle.
+     *
+     * @returns `true` if the key bundle was successfuly downloaded and imported.
+     */
+    maybeAcceptKeyBundle(roomId: string, inviter: string): Promise<boolean>;
+
+    /**
+     * Mark a room as pending a key bundle under MSC4268. The backend will listen for room key bundle messages, and if
+     * it sees one matching the room specified, it will automatically import it as long as the message author's ID matches
+     * the inviter's ID.
+     *
+     * @param roomId - The room we were invited to, for which we did not receive a key bundle before accepting the invite.
+     * @param inviterId - The user who invited us to the room and is expected to send the room key bundle.
+     */
+    markRoomAsPendingKeyBundle(roomId: string, inviterId: string): Promise<void>;
+}
+
+/**
+ * The parts of a sync response which are relevant to encryption, as passed to
+ * {@link SyncCryptoCallbacks.processSyncChanges}.
+ *
+ * @internal
+ */
+export interface SyncCryptoChanges {
+    /** The to-device events from the sync response (`to_device.events`), or an empty list if there were none. */
+    toDeviceEvents: IToDeviceEvent[];
+
+    /** The `device_lists` field from the sync response, if any. */
+    deviceLists?: IDeviceLists;
+
+    /**
+     * The `device_one_time_keys_count` field from the sync response, if any.
+     *
+     * The meaning of an algorithm missing from the map (or of an absent field) depends on {@link useMsc4186}: in
+     * sync v2 it means that there are no one-time keys of that algorithm on the server; in sliding sync it means that
+     * the count is unchanged since the previous response.
+     */
+    oneTimeKeysCounts?: Record<string, number>;
+
+    /**
+     * The `device_unused_fallback_key_types` field from the sync response, or `undefined` if the response did not
+     * include it (which means that the server does not support fallback keys).
+     */
+    unusedFallbackKeys?: string[];
+
+    /**
+     * Whether to interpret the response with MSC4186 (simplified sliding sync) semantics rather than sync v2. This
+     * selects the meaning of missing one-time key counts: see {@link oneTimeKeysCounts}. Defaults to `false`.
+     */
+    useMsc4186?: boolean;
 }
 
 /** The methods which crypto implementations should expose to the Sync api
@@ -127,34 +159,23 @@ export interface CryptoBackend extends SyncCryptoCallbacks, CryptoApi {
  */
 export interface SyncCryptoCallbacks {
     /**
-     * Called by the /sync loop whenever there are incoming to-device messages.
+     * Called by the sync loop once per sync response, with the parts of the response which are relevant to
+     * encryption: to-device messages, device list changes, one-time key counts and unused fallback key types.
      *
-     * The implementation may preprocess the received messages (eg, decrypt them) and return an
-     * updated list of messages for dispatch to the rest of the system.
+     * All of this data must be passed together, in a single call per sync response, because the OlmMachine
+     * interprets it as the complete E2EE state from a sync response. In particular, per the sync v2 specification,
+     * an absent `device_one_time_keys_count` means that there are no one-time keys on the server, so calling this
+     * without the counts from the response would trigger a spurious one-time key upload. (Sliding sync responses
+     * omit the count when it is unchanged; {@link SyncCryptoChanges.useMsc4186} selects that interpretation.)
      *
-     * Note that, unlike {@link ClientEvent.ToDeviceEvent} events, this is called on the raw to-device
-     * messages, rather than the results of any decryption attempts.
+     * This must be called before the room events in the sync response are processed, so that any room keys received
+     * in to-device messages are available when decrypting room events.
      *
-     * @param events - the received to-device messages
-     * @returns A list of preprocessed to-device messages.
+     * @param changes - the E2EE-relevant parts of the sync response
+     * @returns A list of processed to-device messages. This will not map 1:1 to the input list, as some messages may
+     *    be invalid or fail to decrypt, and so will be omitted from the output list.
      */
-    preprocessToDeviceMessages(events: IToDeviceEvent[]): Promise<IToDeviceEvent[]>;
-
-    /**
-     * Called by the /sync loop when one time key counts and unused fallback key details are received.
-     *
-     * @param oneTimeKeysCounts - the received one time key counts
-     * @param unusedFallbackKeys - the received unused fallback keys
-     */
-    processKeyCounts(oneTimeKeysCounts?: Record<string, number>, unusedFallbackKeys?: string[]): Promise<void>;
-
-    /**
-     * Handle the notification from /sync that device lists have
-     * been changed.
-     *
-     * @param deviceLists - device_lists field from /sync
-     */
-    processDeviceLists(deviceLists: IDeviceLists): Promise<void>;
+    processSyncChanges(changes: SyncCryptoChanges): Promise<ReceivedToDeviceMessage[]>;
 
     /**
      * Called by the /sync loop whenever an m.room.encryption event is received.
@@ -178,6 +199,15 @@ export interface SyncCryptoCallbacks {
      * @param syncState - information about the completed sync.
      */
     onSyncCompleted(syncState: OnSyncCompletedData): void;
+
+    /**
+     * Mark all tracked users' device lists as dirty.
+     *
+     * This method will cause additional `/keys/query` requests on the server, so should be used only
+     * when the client has desynced tracking device list deltas from the server.
+     * In MSC4186: Simplified Sliding Sync, this can happen when the server expires the connection.
+     */
+    markAllTrackedUsersAsDirty(): Promise<void>;
 }
 
 /**
@@ -196,13 +226,6 @@ export interface OnSyncCompletedData {
 }
 
 /**
- * Options object for {@link CryptoBackend#checkOwnCrossSigningTrust}.
- */
-export interface CheckOwnCrossSigningTrustOpts {
-    allowPrivateKeyRequests?: boolean;
-}
-
-/**
  * The result of a (successful) call to {@link CryptoBackend.decryptEvent}
  */
 export interface EventDecryptionResult {
@@ -211,8 +234,9 @@ export interface EventDecryptionResult {
      */
     clearEvent: IClearEvent;
     /**
-     * List of curve25519 keys involved in telling us about the senderCurve25519Key and claimedEd25519Key.
+     * No longer used.
      * See {@link MatrixEvent#getForwardingCurve25519KeyChain}.
+     * @deprecated
      */
     forwardingCurve25519KeyChain?: string[];
     /**
@@ -223,11 +247,13 @@ export interface EventDecryptionResult {
      * ed25519 key claimed by the sender of this event. See {@link MatrixEvent#getClaimedEd25519Key}.
      */
     claimedEd25519Key?: string;
+
     /**
-     * Whether the keys for this event have been received via an unauthenticated source (eg via key forwards, or
-     * restored from backup)
+     * If another user forwarded the key to this message
+     * (eg via [MSC4268](https://github.com/matrix-org/matrix-spec-proposals/pull/4268)),
+     * the ID of that user.
      */
-    untrusted?: boolean;
+    keyForwardedBy?: string;
 }
 
 /**

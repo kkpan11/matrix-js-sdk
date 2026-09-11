@@ -14,21 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import fetchMock from "fetch-mock-jest";
+import fetchMock from "@fetch-mock/vitest";
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
+import Olm from "@matrix-org/olm";
 
-import { CRYPTO_BACKENDS, getSyncResponse, InitCrypto, syncPromise } from "../../test-utils/test-utils";
-import { createClient, MatrixClient } from "../../../src";
-import * as testData from "../../test-utils/test-data";
+import { getSyncResponse, syncPromise } from "../../test-utils/test-utils";
+import {
+    ClientEvent,
+    createClient,
+    type IToDeviceEvent,
+    type MatrixClient,
+    type MatrixEvent,
+    type ReceivedToDeviceMessage,
+} from "../../../src";
+import * as testData from "../../test-utils/crypto-test-data";
 import { E2EKeyResponder } from "../../test-utils/E2EKeyResponder";
 import { SyncResponder } from "../../test-utils/SyncResponder";
 import { E2EKeyReceiver } from "../../test-utils/E2EKeyReceiver";
+import { encryptOlmEvent, establishOlmSession, getTestOlmAccountKeys } from "./olm-utils.ts";
 
 afterEach(() => {
     // reset fake-indexeddb after each test, to make sure we don't leak connections
     // cf https://github.com/dumbmatter/fakeIndexedDB#wipingresetting-the-indexeddb-for-a-fresh-state
-    // eslint-disable-next-line no-global-assign
     indexedDB = new IDBFactory();
 });
 
@@ -38,17 +46,18 @@ afterEach(() => {
  * These tests work by intercepting HTTP requests via fetch-mock rather than mocking out bits of the client, so as
  * to provide the most effective integration tests possible.
  */
-describe.each(Object.entries(CRYPTO_BACKENDS))("to-device-messages (%s)", (backend: string, initCrypto: InitCrypto) => {
+describe("to-device-messages", () => {
     let aliceClient: MatrixClient;
 
     /** an object which intercepts `/keys/query` requests on the test homeserver */
     let e2eKeyResponder: E2EKeyResponder;
+    let e2eKeyReceiver: E2EKeyReceiver;
+    let syncResponder: SyncResponder;
 
     beforeEach(
         async () => {
             // anything that we don't have a specific matcher for silently returns a 404
             fetchMock.catch(404);
-            fetchMock.config.warnOnFallback = false;
 
             const homeserverUrl = "https://server.com";
             aliceClient = createClient({
@@ -59,8 +68,8 @@ describe.each(Object.entries(CRYPTO_BACKENDS))("to-device-messages (%s)", (backe
             });
 
             e2eKeyResponder = new E2EKeyResponder(homeserverUrl);
-            new E2EKeyReceiver(homeserverUrl);
-            const syncResponder = new SyncResponder(homeserverUrl);
+            e2eKeyReceiver = new E2EKeyReceiver(homeserverUrl);
+            syncResponder = new SyncResponder(homeserverUrl, { e2eKeyReceiver });
 
             // add bob as known user
             syncResponder.sendOrQueueSyncResponse(getSyncResponse([testData.BOB_TEST_USER_ID]));
@@ -81,7 +90,7 @@ describe.each(Object.entries(CRYPTO_BACKENDS))("to-device-messages (%s)", (backe
                 { filter_id: "fid" },
             );
 
-            await initCrypto(aliceClient);
+            await aliceClient.initRustCrypto();
         },
         /* it can take a while to initialise the crypto library on the first pass, so bump up the timeout. */
         10000,
@@ -89,7 +98,6 @@ describe.each(Object.entries(CRYPTO_BACKENDS))("to-device-messages (%s)", (backe
 
     afterEach(async () => {
         aliceClient.stopClient();
-        fetchMock.mockReset();
     });
 
     describe("encryptToDeviceMessages", () => {
@@ -147,6 +155,113 @@ describe.each(Object.entries(CRYPTO_BACKENDS))("to-device-messages (%s)", (backe
             );
 
             // for future: check that bob's device can decrypt the ciphertext?
+        });
+    });
+
+    describe("receive to-device-messages", () => {
+        it("Should receive decrypted to-device message via ClientEvent", async () => {
+            // create a test olm device which we will use to communicate with alice. We use libolm to implement this.
+            await Olm.init();
+            const testOlmAccount = new Olm.Account();
+            testOlmAccount.create();
+
+            const testDeviceKeys = getTestOlmAccountKeys(testOlmAccount, "@bob:xyz", "DEVICE_ID");
+            e2eKeyResponder.addDeviceKeys(testDeviceKeys);
+
+            await aliceClient.startClient();
+            await syncPromise(aliceClient);
+
+            syncResponder.sendOrQueueSyncResponse(getSyncResponse(["@bob:xyz"]));
+            await syncPromise(aliceClient);
+
+            const p2pSession = await establishOlmSession(aliceClient, e2eKeyReceiver, syncResponder, testOlmAccount);
+
+            const toDeviceEvent = encryptOlmEvent({
+                sender: "@bob:xyz",
+                senderKey: testDeviceKeys.keys[`curve25519:DEVICE_ID`],
+                senderSigningKey: testDeviceKeys.keys[`ed25519:DEVICE_ID`],
+                p2pSession: p2pSession,
+                recipient: aliceClient.getUserId()!,
+                recipientCurve25519Key: e2eKeyReceiver.getDeviceKey(),
+                recipientEd25519Key: e2eKeyReceiver.getSigningKey(),
+                plaincontent: {
+                    body: "foo",
+                },
+                plaintype: "m.test.type",
+            });
+
+            const processedToDeviceResolver: PromiseWithResolvers<ReceivedToDeviceMessage> = Promise.withResolvers();
+
+            aliceClient.on(ClientEvent.ReceivedToDeviceMessage, (payload) => {
+                processedToDeviceResolver.resolve(payload);
+            });
+
+            const oldToDeviceResolver: PromiseWithResolvers<MatrixEvent> = Promise.withResolvers();
+
+            aliceClient.on(ClientEvent.ToDeviceEvent, (event) => {
+                oldToDeviceResolver.resolve(event);
+            });
+
+            expect(toDeviceEvent.type).toBe("m.room.encrypted");
+
+            syncResponder.sendOrQueueSyncResponse({ to_device: { events: [toDeviceEvent] } });
+            await syncPromise(aliceClient);
+
+            const { message, encryptionInfo } = await processedToDeviceResolver.promise;
+
+            expect(message.type).toBe("m.test.type");
+            expect(message.content["body"]).toBe("foo");
+
+            expect(encryptionInfo).not.toBeNull();
+            expect(encryptionInfo!.senderVerified).toBe(false);
+            expect(encryptionInfo!.sender).toBe("@bob:xyz");
+            expect(encryptionInfo!.senderDevice).toBe("DEVICE_ID");
+
+            const oldFormat = await oldToDeviceResolver.promise;
+            expect(oldFormat.isEncrypted()).toBe(true);
+            expect(oldFormat.getType()).toBe("m.test.type");
+            expect(oldFormat.getContent()["body"]).toBe("foo");
+        });
+
+        it("Should receive clear to-device message via ClientEvent", async () => {
+            await aliceClient.startClient();
+            await syncPromise(aliceClient);
+
+            const toDeviceEvent: IToDeviceEvent = {
+                sender: "@bob:xyz",
+                type: "m.test.type",
+                content: {
+                    body: "foo",
+                },
+            };
+
+            const processedToDeviceResolver: PromiseWithResolvers<ReceivedToDeviceMessage> = Promise.withResolvers();
+
+            aliceClient.on(ClientEvent.ReceivedToDeviceMessage, (payload) => {
+                processedToDeviceResolver.resolve(payload);
+            });
+
+            const oldToDeviceResolver: PromiseWithResolvers<MatrixEvent> = Promise.withResolvers();
+
+            aliceClient.on(ClientEvent.ToDeviceEvent, (event) => {
+                oldToDeviceResolver.resolve(event);
+            });
+
+            syncResponder.sendOrQueueSyncResponse({ to_device: { events: [toDeviceEvent] } });
+            await syncPromise(aliceClient);
+
+            const { message, encryptionInfo } = await processedToDeviceResolver.promise;
+
+            expect(message.type).toBe("m.test.type");
+            expect(message.content["body"]).toBe("foo");
+
+            // When the message is not encrypted, we don't have the encryptionInfo.
+            expect(encryptionInfo).toBeNull();
+
+            const oldFormat = await oldToDeviceResolver.promise;
+            expect(oldFormat.isEncrypted()).toBe(false);
+            expect(oldFormat.getType()).toBe("m.test.type");
+            expect(oldFormat.getContent()["body"]).toBe("foo");
         });
     });
 });

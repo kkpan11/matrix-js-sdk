@@ -14,85 +14,110 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import fetchMock from "fetch-mock-jest";
+import fetchMock from "@fetch-mock/vitest";
 
-import { ISyncResponder } from "./SyncResponder";
+import { type ISyncResponder } from "./SyncResponder";
 
 /**
- *  An object which intercepts `account_data` get and set requests via fetch-mock.
+ * An object which intercepts `account_data` get and set requests via fetch-mock.
+ *
+ * To use this, call {@link interceptSetAccountData} for each type of account date that should be handled. The updated
+ * account data will be stored in {@link accountDataEvents}; it will also trigger a sync response echoing the updated
+ * data.
+ *
+ * Optionally, you can also call {@link interceptGetAccountData}.
  */
 export class AccountDataAccumulator {
     /**
      * The account data events to be returned by the sync.
      * Will be updated when fetchMock intercepts calls to PUT `/_matrix/client/v3/user/:userId/account_data/`.
-     * Will be used by `sendSyncResponseWithUpdatedAccountData`
      */
     public accountDataEvents: Map<string, any> = new Map();
 
+    public constructor(private syncResponder: ISyncResponder) {}
+
+    private accountDataResolvers = new Map<string, PromiseWithResolvers<any>>();
+    private setInterceptRunning = false;
+
     /**
-     * Intercept requests to set a particular type of account data.
+     * Intercept setting of account data.
      *
      * Once it is set, its data is stored (for future return by `interceptGetAccountData` etc) and the resolved promise is
      * resolved.
      *
-     * @param accountDataType - type of account data to be intercepted
-     * @param opts - options to pass to fetchMock
      * @returns a Promise which will resolve (with the content of the account data) once it is set.
      */
-    public interceptSetAccountData(
-        accountDataType: string,
-        opts?: Parameters<(typeof fetchMock)["put"]>[2],
-    ): Promise<any> {
-        return new Promise((resolve) => {
-            // Called when the cross signing key is uploaded
-            fetchMock.put(
-                `express:/_matrix/client/v3/user/:userId/account_data/${accountDataType}`,
-                (url: string, options: RequestInit) => {
-                    const content = JSON.parse(options.body as string);
-                    const type = url.split("/").pop();
-                    // update account data for sync response
-                    this.accountDataEvents.set(type!, content);
-                    resolve(content);
-                    return {};
-                },
-                opts,
-            );
+    public interceptSetAccountData(): void {
+        if (this.setInterceptRunning) return;
+        this.setInterceptRunning = true;
+
+        fetchMock.put(`express:/_matrix/client/v3/user/:userId/account_data/:type`, (callLog) => {
+            const content = JSON.parse(callLog.options.body as string);
+            const type = callLog.url.split("/").pop();
+            // update account data for sync response
+            this.accountDataEvents.set(type!, content);
+
+            this.accountDataResolvers.get(type!)?.resolve(content);
+            if (!this.accountDataResolvers.delete(type!)) {
+                // Check for a wildcard matcher
+                for (const [key, resolver] of this.accountDataResolvers) {
+                    if (key.endsWith("*") && type?.startsWith(key.slice(0, -1))) {
+                        resolver.resolve(content);
+                        this.accountDataResolvers.delete(key);
+                    }
+                }
+            }
+
+            // return a sync response
+            this.sendSyncResponseWithUpdatedAccountData();
+            return {};
         });
+    }
+
+    /**
+     * Wait for a particular type of account data.
+     *
+     * Once it is set, its data is stored (for future return by `interceptGetAccountData` etc) and the resolved promise is
+     * resolved.
+     *
+     * @returns a Promise which will resolve (with the content of the account data) once it is set.
+     */
+    public waitForAccountData(type: string): Promise<any> {
+        const resolvers = Promise.withResolvers<any>();
+        this.accountDataResolvers.set(type, resolvers);
+        this.interceptSetAccountData();
+        return resolvers.promise;
     }
 
     /**
      * Intercept all requests to get account data
      */
     public interceptGetAccountData(): void {
-        fetchMock.get(
-            `express:/_matrix/client/v3/user/:userId/account_data/:type`,
-            (url) => {
-                const type = url.split("/").pop();
-                const existing = this.accountDataEvents.get(type!);
-                if (existing) {
-                    // return it
-                    return {
-                        status: 200,
-                        body: existing,
-                    };
-                } else {
-                    // 404
-                    return {
-                        status: 404,
-                        body: { errcode: "M_NOT_FOUND", error: "Account data not found." },
-                    };
-                }
-            },
-            { overwriteRoutes: true },
-        );
+        fetchMock.get(`express:/_matrix/client/v3/user/:userId/account_data/:type`, (callLog) => {
+            const type = callLog.url.split("/").pop();
+            const existing = this.accountDataEvents.get(type!);
+            if (existing) {
+                // return it
+                return {
+                    status: 200,
+                    body: existing,
+                };
+            } else {
+                // 404
+                return {
+                    status: 404,
+                    body: { errcode: "M_NOT_FOUND", error: "Account data not found." },
+                };
+            }
+        });
     }
 
     /**
      * Send a sync response the current account data events.
      */
-    public sendSyncResponseWithUpdatedAccountData(syncResponder: ISyncResponder): void {
+    private sendSyncResponseWithUpdatedAccountData(): void {
         try {
-            syncResponder.sendOrQueueSyncResponse({
+            this.syncResponder.sendOrQueueSyncResponse({
                 next_batch: 1,
                 account_data: {
                     events: Array.from(this.accountDataEvents, ([type, content]) => ({

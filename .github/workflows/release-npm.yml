@@ -1,52 +1,50 @@
 name: Publish to npm
 on:
     workflow_call:
-        secrets:
-            NPM_TOKEN:
-                required: true
+        inputs:
+            dir:
+                description: The directory to release
+                type: string
+                default: "."
         outputs:
             id:
                 description: "The npm package@version string we published"
                 value: ${{ jobs.npm.outputs.id }}
-permissions: {} # No permissions required
+permissions: {}
 jobs:
     npm:
         name: Publish to npm
         runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            id-token: write
         outputs:
             id: ${{ steps.npm-publish.outputs.id }}
         steps:
             - name: 🧮 Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
               with:
                   ref: staging
+                  persist-credentials: false
 
-            - name: 🔧 Yarn cache
-              uses: actions/setup-node@v4
+            - name: 🔨 Setup pnpm & node
+              uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
               with:
-                  cache: "yarn"
-                  registry-url: "https://registry.npmjs.org"
-                  node-version-file: package.json
-
-            - name: 🔨 Install dependencies
-              run: "yarn install --frozen-lockfile"
+                  runtime: node
+                  cache: true
+                  install: true
 
             - name: 🚀 Publish to npm
               id: npm-publish
-              uses: JS-DevTools/npm-publish@19c28f1ef146469e409470805ea4279d47c3d35c # v3.1.1
-              with:
-                  token: ${{ secrets.NPM_TOKEN }}
-                  access: public
-                  tag: next
-                  ignore-scripts: false
+              working-directory: ${{ inputs.dir }}
+              run: |
+                  version=$(jq -r '.version' package.json)
+                  if [[ "$version" == *-rc.* ]]; then
+                      tag=next
+                  else
+                      tag=latest
+                  fi
 
-            - name: Check npm package was published
-              if: steps.npm-publish.outputs.id == ''
-              run: exit 1
-
-            - name: 🎖️ Add `latest` dist-tag to final releases
-              if: steps.npm-publish.outputs.id && !contains(steps.npm-publish.outputs.id, '-rc.')
-              run: npm dist-tag add "$release" latest
-              env:
-                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-                  release: ${{ steps.npm-publish.outputs.id }}
+                  pnpm publish --provenance --access public --publish-branch staging --tag "$tag"
+                  release=$(jq -r '"\(.name)@\(.version)"' package.json)
+                  echo "id=$release" >> $GITHUB_OUTPUT

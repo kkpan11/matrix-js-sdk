@@ -1,17 +1,34 @@
+/*
+Copyright 2025 The Matrix.org Foundation C.I.C.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 import * as utils from "../test-utils/test-utils";
-import { IActionsObject, PushProcessor } from "../../src/pushprocessor";
+import { type IActionsObject, PushProcessor } from "../../src/pushprocessor";
 import {
     ConditionKind,
     EventType,
-    IContent,
-    IPushRule,
-    MatrixClient,
-    MatrixEvent,
+    type IContent,
+    type IPushRule,
+    type MatrixClient,
+    type MatrixEvent,
     PushRuleActionName,
     RuleId,
     TweakName,
 } from "../../src";
 import { mockClientMethodsUser } from "../test-utils/client";
+import { logger } from "../../src/logger.ts";
 
 const msc3914RoomCallRule: IPushRule = {
     rule_id: ".org.matrix.msc3914.rule.room.call",
@@ -193,7 +210,7 @@ describe("NotificationService", function () {
                 msgtype: "m.text",
             },
         });
-        matrixClient.pushRules = PushProcessor.rewriteDefaultRules(matrixClient.pushRules!);
+        matrixClient.pushRules = PushProcessor.rewriteDefaultRules(logger, matrixClient.pushRules!);
         pushProcessor = new PushProcessor(matrixClient);
     });
 
@@ -311,7 +328,7 @@ describe("NotificationService", function () {
 
     describe("group call started push rule", () => {
         beforeEach(() => {
-            matrixClient.pushRules!.global!.underride!.find((r) => r.rule_id === ".m.rule.fallback")!.enabled = false;
+            matrixClient.pushRules!.global.underride!.find((r) => r.rule_id === ".m.rule.fallback")!.enabled = false;
         });
 
         const getActionsForEvent = (prevContent: IContent, content: IContent): IActionsObject => {
@@ -340,6 +357,7 @@ describe("NotificationService", function () {
             expect(actions?.tweaks?.highlight).toBeFalsy();
         };
 
+        // eslint-disable-next-line @vitest/expect-expect
         it.each(["m.ring", "m.prompt"])(
             "should notify when new group call event appears with %s intent",
             (intent: string) => {
@@ -356,6 +374,7 @@ describe("NotificationService", function () {
             },
         );
 
+        // eslint-disable-next-line @vitest/expect-expect
         it("should notify when a call is un-terminated", () => {
             assertDoesNotify(
                 getActionsForEvent(
@@ -374,6 +393,7 @@ describe("NotificationService", function () {
             );
         });
 
+        // eslint-disable-next-line @vitest/expect-expect
         it("should not notify when call is terminated", () => {
             assertDoesNotNotify(
                 getActionsForEvent(
@@ -392,6 +412,7 @@ describe("NotificationService", function () {
             );
         });
 
+        // eslint-disable-next-line @vitest/expect-expect
         it("should ignore with m.room intent", () => {
             assertDoesNotNotify(
                 getActionsForEvent(
@@ -406,6 +427,7 @@ describe("NotificationService", function () {
         });
 
         describe("ignoring non-relevant state changes", () => {
+            // eslint-disable-next-line @vitest/expect-expect
             it("should ignore intent changes", () => {
                 assertDoesNotNotify(
                     getActionsForEvent(
@@ -423,6 +445,7 @@ describe("NotificationService", function () {
                 );
             });
 
+            // eslint-disable-next-line @vitest/expect-expect
             it("should ignore name changes", () => {
                 assertDoesNotNotify(
                     getActionsForEvent(
@@ -476,7 +499,7 @@ describe("NotificationService", function () {
             { value: null, eventValue: [], expected: false },
             { value: null, eventValue: {}, expected: false },
         ])("test $value against $eventValue", ({ value, eventValue, expected }) => {
-            matrixClient.pushRules! = {
+            matrixClient.pushRules = {
                 global: {
                     override: [
                         {
@@ -545,7 +568,7 @@ describe("NotificationService", function () {
             { value: null, eventValue: null, expected: false },
             { value: null, eventValue: undefined, expected: false },
         ])("test $value against $eventValue", ({ value, eventValue, expected }) => {
-            matrixClient.pushRules! = {
+            matrixClient.pushRules = {
                 global: {
                     override: [
                         {
@@ -715,7 +738,7 @@ describe("Test PushProcessor.partsForDottedKey", function () {
 
 describe("rewriteDefaultRules", () => {
     it("should add default rules in the correct order", () => {
-        const pushRules = PushProcessor.rewriteDefaultRules({
+        const pushRules = PushProcessor.rewriteDefaultRules(logger, {
             device: {},
             global: {
                 content: [],
@@ -851,7 +874,7 @@ describe("rewriteDefaultRules", () => {
     });
 
     it("should add missing msc3914 rule in correct place", () => {
-        const pushRules = PushProcessor.rewriteDefaultRules({
+        const pushRules = PushProcessor.rewriteDefaultRules(logger, {
             device: {},
             global: {
                 // Sample push rules from a Synapse user.
@@ -1002,5 +1025,27 @@ describe("rewriteDefaultRules", () => {
             ".m.rule.encrypted",
             ".im.vector.jitsi",
         ]);
+    });
+});
+
+describe("getPushRuleGlobRegex", () => {
+    it("should not confuse flags in cache", () => {
+        const pattern = "Test";
+        const regex1 = PushProcessor.getPushRuleGlobRegex(pattern, false, "i");
+        const regex2 = PushProcessor.getPushRuleGlobRegex(pattern, false, "g");
+        const regex3 = PushProcessor.getPushRuleGlobRegex(pattern, false, "i");
+
+        expect(regex1.flags).toBe("i");
+        expect(regex2.flags).toBe("g");
+
+        expect(regex1).not.toEqual(regex2);
+        expect(regex1).toEqual(regex3);
+    });
+
+    it("should not include word boundary in match", () => {
+        const pattern = "@room";
+        const regex = PushProcessor.getPushRuleGlobRegex(pattern, true);
+        const input = "Foo @room Bar";
+        expect(input.split(regex)).toEqual(["Foo ", "@room", " Bar"]);
     });
 });

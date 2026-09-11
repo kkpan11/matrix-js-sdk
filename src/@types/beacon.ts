@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { RelatesToRelationship, REFERENCE_RELATION } from "./extensible_events.ts";
+import { type RelatesToRelationship, type REFERENCE_RELATION } from "./extensible_events.ts";
 import { UnstableValue } from "../NamespacedValue.ts";
-import { MAssetEvent, MLocationEvent, MTimestampEvent } from "./location.ts";
+import { type MAssetEvent, type MLocationEvent, type MTimestampEvent } from "./location.ts";
 
 /**
  * Beacon info and beacon event types as described in MSC3672
@@ -30,7 +30,7 @@ import { MAssetEvent, MLocationEvent, MTimestampEvent } from "./location.ts";
  * 2. a user can have an arbitrary number of beacon_info events
  *
  * 1. is achieved by setting the state_key to the owners mxid.
- * Event keys in room state are a combination of `type` + `state_key`.
+ * Event keys in room state are a combination of `typestate_key`.
  * To achieve an arbitrary number of only owner-writable state events
  * we introduce a variable suffix to the event type
  *

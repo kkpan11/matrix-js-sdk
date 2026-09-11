@@ -17,11 +17,11 @@ limitations under the License.
 import MockHttpBackend from "matrix-mock-request";
 import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 
-import { IndexedDBStore, MatrixEvent, MemoryStore, Room } from "../../src";
+import { IndexedDBStore, MatrixEvent, MemoryStore, type Room } from "../../src";
 import { MatrixClient } from "../../src/client";
-import { ToDeviceBatch } from "../../src/models/ToDeviceMessage";
+import { type ToDeviceBatch } from "../../src/models/ToDeviceMessage";
 import { logger } from "../../src/logger";
-import { IStore } from "../../src/store";
+import { type IStore } from "../../src/store";
 import { flushPromises } from "../test-utils/flushPromises";
 import { removeElement } from "../../src/utils";
 
@@ -53,7 +53,7 @@ async function flushAndRunTimersUntil(cond: () => boolean) {
     while (!cond()) {
         await flushPromises();
         if (cond()) break;
-        jest.advanceTimersToNextTimer();
+        vi.advanceTimersToNextTimer();
     }
 }
 
@@ -126,13 +126,15 @@ describe.each([[StoreType.Memory], [StoreType.IndexedDB]])("queueToDevice (%s st
                 eventType: "org.example.foo",
                 batch: [FAKE_MSG],
             });
-            expect(await httpBackend.flush(undefined, 1, 1)).toEqual(1);
+            // flush the 500 response
+            expect(await httpBackend.flush("/sendToDevice/org.example.foo/", 1, 20)).toEqual(1);
             await flushPromises();
 
             client.retryImmediately();
 
+            // flush the 200 response
             // longer timeout here to try & avoid flakiness
-            expect(await httpBackend.flush(undefined, 1, 3000)).toEqual(1);
+            expect(await httpBackend.flush("/sendToDevice/org.example.foo/", 1, 3000)).toEqual(1);
         });
 
         it("retries on when client is started", async function () {
@@ -150,13 +152,15 @@ describe.each([[StoreType.Memory], [StoreType.IndexedDB]])("queueToDevice (%s st
                 eventType: "org.example.foo",
                 batch: [FAKE_MSG],
             });
-            expect(await httpBackend.flush(undefined, 1, 1)).toEqual(1);
+            // flush the 500 response
+            expect(await httpBackend.flush("/sendToDevice/org.example.foo/", 1, 20)).toEqual(1);
             await flushPromises();
 
             client.stopClient();
             await Promise.all([client.startClient(), httpBackend.flush("/_matrix/client/versions", 1, 20)]);
 
-            expect(await httpBackend.flush(undefined, 1, 20)).toEqual(1);
+            // flush the 200 response
+            expect(await httpBackend.flush("/sendToDevice/org.example.foo/", 1, 20)).toEqual(1);
         });
 
         it("retries when a message is retried", async function () {
@@ -182,8 +186,8 @@ describe.each([[StoreType.Memory], [StoreType.IndexedDB]])("queueToDevice (%s st
                 event_id: "!fake:example.org",
             });
             const mockRoom = {
-                updatePendingEvent: jest.fn(),
-                hasEncryptionStateEvent: jest.fn().mockReturnValue(false),
+                updatePendingEvent: vi.fn(),
+                hasEncryptionStateEvent: vi.fn().mockReturnValue(false),
             } as unknown as Room;
             client.resendEvent(dummyEvent, mockRoom);
 
@@ -230,11 +234,11 @@ describe.each([[StoreType.Memory], [StoreType.IndexedDB]])("queueToDevice (%s st
 
     describe("async tests", () => {
         beforeAll(() => {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
         });
 
         afterAll(() => {
-            jest.useRealTimers();
+            vi.useRealTimers();
         });
 
         beforeEach(async function () {
@@ -337,14 +341,14 @@ describe.each([[StoreType.Memory], [StoreType.IndexedDB]])("queueToDevice (%s st
 
             logger.info("Advancing clock to just before expected retry time...");
 
-            jest.advanceTimersByTime(retryDelay - 1000);
+            vi.advanceTimersByTime(retryDelay - 1000);
             await flushPromises();
 
             expect(httpBackend.requests.length).toEqual(0);
 
             logger.info("Advancing clock past expected retry time...");
 
-            jest.advanceTimersByTime(2000);
+            vi.advanceTimersByTime(2000);
             await flushPromises();
 
             expect(httpBackend.flushSync(undefined, 1)).toEqual(1);

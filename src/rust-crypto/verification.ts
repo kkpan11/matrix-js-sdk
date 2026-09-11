@@ -15,27 +15,27 @@ limitations under the License.
 */
 
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
-import { QrState } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type OutgoingRequest, QrState } from "@matrix-org/matrix-sdk-crypto-wasm";
 
 import {
-    GeneratedSas,
-    ShowQrCodeCallbacks,
-    ShowSasCallbacks,
+    type GeneratedSas,
+    type ShowQrCodeCallbacks,
+    type ShowSasCallbacks,
     VerificationPhase,
-    VerificationRequest,
+    type VerificationRequest,
     VerificationRequestEvent,
-    VerificationRequestEventHandlerMap,
-    Verifier,
+    type VerificationRequestEventHandlerMap,
+    type Verifier,
     VerifierEvent,
-    VerifierEventHandlerMap,
+    type VerifierEventHandlerMap,
 } from "../crypto-api/verification.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
-import { OutgoingRequest, OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
+import { type OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
 import { TypedReEmitter } from "../ReEmitter.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type MatrixEvent } from "../models/event.ts";
 import { EventType, MsgType } from "../@types/event.ts";
-import { defer, IDeferred } from "../utils.ts";
 import { VerificationMethod } from "../types.ts";
+import type { Logger } from "../logger.ts";
 
 /**
  * An incoming, or outgoing, request to verify a user or a device via cross-signing.
@@ -60,12 +60,14 @@ export class RustVerificationRequest
     /**
      * Construct a new RustVerificationRequest to wrap the rust-level `VerificationRequest`.
      *
+     * @param logger - A logger instance which will be used to log events.
      * @param olmMachine - The `OlmMachine` from the underlying rust crypto sdk.
      * @param inner - VerificationRequest from the Rust SDK.
      * @param outgoingRequestProcessor - `OutgoingRequestProcessor` to use for making outgoing HTTP requests.
      * @param supportedVerificationMethods - Verification methods to use when `accept()` is called.
      */
     public constructor(
+        private readonly logger: Logger,
         private readonly olmMachine: RustSdkCryptoJs.OlmMachine,
         private readonly inner: RustSdkCryptoJs.VerificationRequest,
         private readonly outgoingRequestProcessor: OutgoingRequestProcessor,
@@ -309,6 +311,7 @@ export class RustVerificationRequest
             return;
         }
 
+        this.logger.info("Cancelling verification request with params:", params);
         this._cancelling = true;
         try {
             const req: undefined | OutgoingRequest = this.inner.cancel();
@@ -474,7 +477,7 @@ abstract class BaseRustVerifer<InnerType extends RustSdkCryptoJs.Qr | RustSdkCry
     VerifierEventHandlerMap & VerificationRequestEventHandlerMap
 > {
     /** A deferred which completes when the verification completes (or rejects when it is cancelled/fails) */
-    protected readonly completionDeferred: IDeferred<void>;
+    protected readonly completionDeferred: PromiseWithResolvers<void>;
 
     public constructor(
         protected inner: InnerType,
@@ -482,7 +485,7 @@ abstract class BaseRustVerifer<InnerType extends RustSdkCryptoJs.Qr | RustSdkCry
     ) {
         super();
 
-        this.completionDeferred = defer();
+        this.completionDeferred = Promise.withResolvers();
 
         // As with RustVerificationRequest, we need to avoid a reference cycle.
         // See the comments in RustVerificationRequest.
@@ -725,7 +728,7 @@ export class RustSASVerifier extends BaseRustVerifer<RustSdkCryptoJs.Sas> implem
                 mismatch: (): void => {
                     const request = this.inner.cancelWithCode("m.mismatched_sas");
                     if (request) {
-                        this.outgoingRequestProcessor.makeOutgoingRequest(request);
+                        void this.outgoingRequestProcessor.makeOutgoingRequest(request);
                     }
                 },
                 cancel: (): void => {

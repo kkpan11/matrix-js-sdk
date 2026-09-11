@@ -19,7 +19,8 @@ import {
     KeysClaimRequest,
     KeysQueryRequest,
     KeysUploadRequest,
-    OlmMachine,
+    type OlmMachine,
+    type OutgoingRequest,
     PutDehydratedDeviceRequest,
     RoomMessageRequest,
     SignatureUploadRequest,
@@ -27,23 +28,12 @@ import {
     UploadSigningKeysRequest,
 } from "@matrix-org/matrix-sdk-crypto-wasm";
 
-import { logger } from "../logger.ts";
-import { calculateRetryBackoff, IHttpOpts, MatrixHttpApi, Method } from "../http-api/index.ts";
-import { logDuration, QueryDict, sleep } from "../utils.ts";
-import { AuthDict, UIAuthCallback } from "../interactive-auth.ts";
-import { UIAResponse } from "../@types/uia.ts";
+import { type Logger } from "../logger.ts";
+import { calculateRetryBackoff, type IHttpOpts, type MatrixHttpApi, Method } from "../http-api/index.ts";
+import { logDuration, type QueryDict, sleep } from "../utils.ts";
+import { type AuthDict, type UIAuthCallback } from "../interactive-auth.ts";
 import { ToDeviceMessageId } from "../@types/event.ts";
 import { UnstablePrefix as DehydrationUnstablePrefix } from "./DehydratedDeviceManager.ts";
-
-/**
- * Common interface for all the request types returned by `OlmMachine.outgoingRequests`.
- *
- * @internal
- */
-export interface OutgoingRequest {
-    readonly id: string | undefined;
-    readonly type: number;
-}
 
 /**
  * OutgoingRequestManager: turns `OutgoingRequest`s from the rust sdk into HTTP requests
@@ -59,6 +49,7 @@ export interface OutgoingRequest {
  */
 export class OutgoingRequestProcessor {
     public constructor(
+        private readonly logger: Logger,
         private readonly olmMachine: OlmMachine,
         private readonly http: MatrixHttpApi<IHttpOpts & { onlyData: true }>,
     ) {}
@@ -110,13 +101,13 @@ export class OutgoingRequestProcessor {
             // PutDehydratedDeviceRequest does not implement OutgoingRequest and does not need to be marked as sent.
             return;
         } else {
-            logger.warn("Unsupported outgoing message", Object.getPrototypeOf(msg));
+            this.logger.warn("Unsupported outgoing message", Object.getPrototypeOf(msg));
             resp = "";
         }
 
         if (msg.id) {
             try {
-                await logDuration(logger, `Mark Request as sent ${msg.type}`, async () => {
+                await logDuration(this.logger, `Mark Request as sent ${msg.type}`, async () => {
                     await this.olmMachine.markRequestAsSent(msg.id!, msg.type, resp);
                 });
             } catch (e) {
@@ -126,13 +117,13 @@ export class OutgoingRequestProcessor {
                     e instanceof Error &&
                     (e.message === "Attempt to use a moved value" || e.message === "null pointer passed to rust")
                 ) {
-                    logger.log(`Ignoring error '${e.message}': client is likely shutting down`);
+                    this.logger.debug(`Ignoring error '${e.message}': client is likely shutting down`);
                 } else {
                     throw e;
                 }
             }
         } else {
-            logger.trace(`Outgoing request type:${msg.type} does not have an ID`);
+            this.logger.trace(`Outgoing request type:${msg.type} does not have an ID`);
         }
     }
 
@@ -153,7 +144,7 @@ export class OutgoingRequestProcessor {
             }
         }
 
-        logger.info(
+        this.logger.info(
             `Sending batch of to-device messages. type=${request.event_type} txnid=${request.txn_id}`,
             messageList,
         );
@@ -176,7 +167,7 @@ export class OutgoingRequestProcessor {
         }
 
         const parsedBody = JSON.parse(body);
-        const makeRequest = async (auth: AuthDict | null): Promise<UIAResponse<T>> => {
+        const makeRequest = async (auth: AuthDict | null): Promise<T> => {
             const newBody: Record<string, any> = {
                 ...parsedBody,
             };
@@ -199,7 +190,6 @@ export class OutgoingRequestProcessor {
     ): Promise<string> {
         let currentRetryCount = 0;
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
             try {
                 return await this.rawJsonRequest(method, path, queryParams, body);
@@ -229,6 +219,12 @@ export class OutgoingRequestProcessor {
 
             // we use the full prefix
             prefix: "",
+
+            // We set a timeout of 60 seconds to guard against requests getting stuck forever and wedging the
+            // request loop (cf https://github.com/element-hq/element-web/issues/29534).
+            //
+            // (XXX: should we do this in the whole of the js-sdk?)
+            localTimeoutMs: 60000,
         };
 
         return await this.http.authedRequest<string>(method, path, queryParams, body, opts);

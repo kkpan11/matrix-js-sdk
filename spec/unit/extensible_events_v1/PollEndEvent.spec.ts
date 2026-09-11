@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { PollEndEventContent, M_POLL_END } from "../../../src/@types/polls";
-import { IPartialEvent, REFERENCE_RELATION, M_TEXT } from "../../../src/@types/extensible_events";
+import { type PollEndEventContent, M_POLL_END } from "../../../src/@types/polls";
+import { type IPartialEvent, REFERENCE_RELATION, M_TEXT } from "../../../src/@types/extensible_events";
 import { PollEndEvent } from "../../../src/extensible_events_v1/PollEndEvent";
 import { InvalidEventError } from "../../../src/extensible_events_v1/InvalidEventError";
 
@@ -79,7 +79,7 @@ describe("PollEndEvent", () => {
                 },
                 [M_POLL_END.name]: {},
                 [M_TEXT.name]: "Poll closed",
-            } as any, // force invalid type
+            },
         };
         expect(() => new PollEndEvent(input)).toThrow(
             new InvalidEventError("Relationship must be a reference to an event"),

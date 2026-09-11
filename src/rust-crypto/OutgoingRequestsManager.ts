@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { OlmMachine } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type OlmMachine, type OutgoingRequest } from "@matrix-org/matrix-sdk-crypto-wasm";
 
-import { OutgoingRequest, OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
-import { Logger } from "../logger.ts";
-import { defer, IDeferred, logDuration } from "../utils.ts";
+import { type OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
+import { type Logger } from "../logger.ts";
+import { logDuration } from "../utils.ts";
 
 /**
  * OutgoingRequestsManager: responsible for processing outgoing requests from the OlmMachine.
@@ -39,7 +39,7 @@ export class OutgoingRequestsManager {
      * will resolve once that next iteration completes. If it is undefined, there have been no new calls
      * to `doProcessOutgoingRequests` since the current iteration started.
      */
-    private nextLoopDeferred?: IDeferred<void>;
+    private nextLoopDeferred?: PromiseWithResolvers<void>;
 
     public constructor(
         private readonly logger: Logger,
@@ -74,7 +74,7 @@ export class OutgoingRequestsManager {
         // In order to circumvent the race, we set a flag which tells the loop to go round once again even if the
         // queue appears to be empty.
         if (!this.nextLoopDeferred) {
-            this.nextLoopDeferred = defer();
+            this.nextLoopDeferred = Promise.withResolvers();
         }
 
         // ... and wait for it to complete.
@@ -99,14 +99,14 @@ export class OutgoingRequestsManager {
         this.outgoingRequestLoopRunning = true;
         try {
             while (!this.stopped && this.nextLoopDeferred) {
-                const deferred = this.nextLoopDeferred;
+                const loopTickResolvers = this.nextLoopDeferred;
 
                 // reset `nextLoopDeferred` so that any future calls to `doProcessOutgoingRequests` are queued
                 // for another additional iteration.
                 this.nextLoopDeferred = undefined;
 
                 // make the requests and feed the results back to the `nextLoopDeferred`
-                await this.processOutgoingRequests().then(deferred.resolve, deferred.reject);
+                await this.processOutgoingRequests().then(loopTickResolvers.resolve, loopTickResolvers.reject);
             }
         } finally {
             this.outgoingRequestLoopRunning = false;
@@ -127,17 +127,44 @@ export class OutgoingRequestsManager {
 
         const outgoingRequests: OutgoingRequest[] = await this.olmMachine.outgoingRequests();
 
+        let successes = 0;
         for (const request of outgoingRequests) {
             if (this.stopped) return;
             try {
                 await logDuration(this.logger, `Make outgoing request ${request.type}`, async () => {
                     await this.outgoingRequestProcessor.makeOutgoingRequest(request);
+                    successes++;
                 });
             } catch (e) {
                 // as part of the loop we silently ignore errors, but log them.
                 // The rust sdk will retry the request later as it won't have been marked as sent.
                 this.logger.error(`Failed to process outgoing request ${request.type}: ${e}`);
             }
+        }
+
+        // If we successfully handled any requests this time, more may have been queued as
+        // part of that handling.
+        //
+        // For example, we may have processed a `/keys/claim` request, which
+        // meant the rust side could establish an Olm session and is now ready to
+        // send out an `m.secret.send` message.
+        // (See https://github.com/element-hq/element-web/issues/30988.)
+        //
+        // So, if we have successfully processed any requests, flag that we need to make another
+        // pass around the outgoing-requests loop, to make sure we handle any
+        // pending requests immediately.
+        //
+        // If all requests failed (or there weren't any) we don't want to retry them in a tight
+        // loop. They will be retried after the next sync.
+        // (See https://github.com/element-hq/element-web/issues/31790.)
+        if (successes > 0) {
+            // We call doProcessOutgoingRequests but since we expect that we are
+            // already processing outgoing requests, this call will not kick off
+            // the processing loop, but just set `nextLoopDeferred` and return,
+            // which will mean we loop one more time.
+            this.doProcessOutgoingRequests().catch((e) => {
+                this.logger.warn("processOutgoingRequests: Error re-checking outgoing requests", e);
+            });
         }
     }
 }

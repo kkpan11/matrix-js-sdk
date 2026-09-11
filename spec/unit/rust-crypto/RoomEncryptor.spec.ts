@@ -18,21 +18,25 @@
 
 import {
     CollectStrategy,
-    Curve25519PublicKey,
-    Ed25519PublicKey,
+    type Curve25519PublicKey,
+    type Ed25519PublicKey,
     HistoryVisibility as RustHistoryVisibility,
-    IdentityKeys,
-    OlmMachine,
+    type IdentityKeys,
+    type OlmMachine,
 } from "@matrix-org/matrix-sdk-crypto-wasm";
-import { Mocked } from "jest-mock";
+import { type Mocked } from "vitest";
 
-import { HistoryVisibility, MatrixEvent, Room, RoomMember } from "../../../src";
+import { HistoryVisibility, type MatrixEvent, type Room, type RoomMember } from "../../../src";
 import { RoomEncryptor, toRustHistoryVisibility } from "../../../src/rust-crypto/RoomEncryptor";
-import { KeyClaimManager } from "../../../src/rust-crypto/KeyClaimManager";
-import { defer } from "../../../src/utils";
-import { OutgoingRequestsManager } from "../../../src/rust-crypto/OutgoingRequestsManager";
+import { type KeyClaimManager } from "../../../src/rust-crypto/KeyClaimManager";
+import { type OutgoingRequestsManager } from "../../../src/rust-crypto/OutgoingRequestsManager";
 import { KnownMembership } from "../../../src/@types/membership";
-import { DeviceIsolationMode, AllDevicesIsolationMode, OnlySignedDevicesIsolationMode } from "../../../src/crypto-api";
+import {
+    type DeviceIsolationMode,
+    AllDevicesIsolationMode,
+    OnlySignedDevicesIsolationMode,
+} from "../../../src/crypto-api";
+import { logger } from "../../../src/logger.ts";
 
 describe("RoomEncryptor", () => {
     describe("History Visibility", () => {
@@ -62,13 +66,14 @@ describe("RoomEncryptor", () => {
 
         function createMockEvent(text: string): Mocked<MatrixEvent> {
             return {
-                getTxnId: jest.fn().mockReturnValue(""),
-                getType: jest.fn().mockReturnValue("m.room.message"),
-                getContent: jest.fn().mockReturnValue({
+                getTxnId: vi.fn().mockReturnValue(""),
+                getType: vi.fn().mockReturnValue("m.room.message"),
+                getContent: vi.fn().mockReturnValue({
                     body: text,
                     msgtype: "m.text",
                 }),
-                makeEncrypted: jest.fn().mockReturnValue(undefined),
+                isState: () => false,
+                makeEncrypted: vi.fn().mockReturnValue(undefined),
             } as unknown as Mocked<MatrixEvent>;
         }
 
@@ -76,35 +81,36 @@ describe("RoomEncryptor", () => {
             mockOlmMachine = {
                 identityKeys: {
                     curve25519: {
-                        toBase64: jest.fn().mockReturnValue("curve25519"),
+                        toBase64: vi.fn().mockReturnValue("curve25519"),
                     } as unknown as Curve25519PublicKey,
                     ed25519: {
-                        toBase64: jest.fn().mockReturnValue("ed25519"),
+                        toBase64: vi.fn().mockReturnValue("ed25519"),
                     } as unknown as Ed25519PublicKey,
                 } as unknown as Mocked<IdentityKeys>,
-                shareRoomKey: jest.fn(),
-                updateTrackedUsers: jest.fn().mockResolvedValue(undefined),
-                encryptRoomEvent: jest.fn().mockResolvedValue("{}"),
+                shareRoomKey: vi.fn(),
+                updateTrackedUsers: vi.fn().mockResolvedValue(undefined),
+                encryptRoomEvent: vi.fn().mockResolvedValue("{}"),
             } as unknown as Mocked<OlmMachine>;
 
             mockKeyClaimManager = {
-                ensureSessionsForUsers: jest.fn(),
+                ensureSessionsForUsers: vi.fn(),
             } as unknown as Mocked<KeyClaimManager>;
 
             mockOutgoingRequestManager = {
-                doProcessOutgoingRequests: jest.fn().mockResolvedValue(undefined),
+                doProcessOutgoingRequests: vi.fn().mockResolvedValue(undefined),
             } as unknown as Mocked<OutgoingRequestsManager>;
 
             mockRoom = {
                 roomId: "!foo:example.org",
-                getJoinedMembers: jest.fn().mockReturnValue([mockRoomMember]),
-                getEncryptionTargetMembers: jest.fn().mockReturnValue([mockRoomMember]),
-                shouldEncryptForInvitedMembers: jest.fn().mockReturnValue(true),
-                getHistoryVisibility: jest.fn().mockReturnValue(HistoryVisibility.Invited),
-                getBlacklistUnverifiedDevices: jest.fn().mockReturnValue(null),
+                getJoinedMembers: vi.fn().mockReturnValue([mockRoomMember]),
+                getEncryptionTargetMembers: vi.fn().mockReturnValue([mockRoomMember]),
+                shouldEncryptForInvitedMembers: vi.fn().mockReturnValue(true),
+                getHistoryVisibility: vi.fn().mockReturnValue(HistoryVisibility.Invited),
+                getBlacklistUnverifiedDevices: vi.fn().mockReturnValue(null),
             } as unknown as Mocked<Room>;
 
             roomEncryptor = new RoomEncryptor(
+                logger,
                 mockOlmMachine,
                 mockKeyClaimManager,
                 mockOutgoingRequestManager,
@@ -116,12 +122,13 @@ describe("RoomEncryptor", () => {
         const defaultDevicesIsolationMode = new AllDevicesIsolationMode(false);
 
         it("should ensure that there is only one shareRoomKey at a time", async () => {
-            const deferredShare = defer<void>();
-            const insideOlmShareRoom = defer<void>();
+            const deferredShare = Promise.withResolvers<void>();
+            const insideOlmShareRoom = Promise.withResolvers<void>();
 
             mockOlmMachine.shareRoomKey.mockImplementationOnce(async () => {
                 insideOlmShareRoom.resolve();
                 await deferredShare.promise;
+                return [];
             });
 
             roomEncryptor.prepareForEncryption(false, defaultDevicesIsolationMode);
@@ -144,10 +151,10 @@ describe("RoomEncryptor", () => {
 
         // Regression test for https://github.com/element-hq/element-web/issues/26684
         it("Should maintain order of encryption requests", async () => {
-            const firstTargetMembers = defer<void>();
-            const secondTargetMembers = defer<void>();
+            const firstTargetMembers = Promise.withResolvers<void>();
+            const secondTargetMembers = Promise.withResolvers<void>();
 
-            mockOlmMachine.shareRoomKey.mockResolvedValue(undefined);
+            mockOlmMachine.shareRoomKey.mockResolvedValue([]);
 
             // Hook into this method to demonstrate the race condition
             mockRoom.getEncryptionTargetMembers
@@ -261,6 +268,7 @@ describe("RoomEncryptor", () => {
                 capturedSettings = undefined;
                 mockOlmMachine.shareRoomKey.mockImplementationOnce(async (roomId, users, encryptionSettings) => {
                     capturedSettings = encryptionSettings.sharingStrategy;
+                    return [];
                 });
             });
 

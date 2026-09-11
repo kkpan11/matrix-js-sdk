@@ -18,21 +18,22 @@ limitations under the License.
 import { ReceiptType } from "../../src/@types/read_receipts";
 import {
     Category,
-    IInvitedRoom,
-    IInviteState,
-    IJoinedRoom,
-    IKnockedRoom,
-    IKnockState,
-    ILeftRoom,
-    IRoomEvent,
-    IStateEvent,
-    IStrippedState,
-    ISyncResponse,
+    type IInvitedRoom,
+    type IInviteState,
+    type IJoinedRoom,
+    type IKnockedRoom,
+    type IKnockState,
+    type ILeftRoom,
+    type IRoomEvent,
+    type IStateEvent,
+    type IStickyEvent,
+    type IStrippedState,
+    type ISyncResponse,
     SyncAccumulator,
 } from "../../src/sync-accumulator";
-import { IRoomSummary } from "../../src";
+import { type IRoomSummary } from "../../src";
 import * as utils from "../test-utils/test-utils";
-import { KnownMembership, Membership } from "../../src/@types/membership";
+import { KnownMembership, type Membership } from "../../src/@types/membership";
 
 // The event body & unsigned object get frozen to assert that they don't get altered
 // by the impl
@@ -571,6 +572,49 @@ describe("SyncAccumulator", function () {
         expect(sa.getJSON().roomsData.knock["!knock:bar"]).toBeUndefined();
     });
 
+    it("should delete knock state when room transitions from knock to join", () => {
+        const initKnockState = makeKnockState();
+        sa.accumulate(
+            syncSkeleton(
+                {},
+                {},
+                {},
+                {
+                    knock_state: initKnockState,
+                },
+            ),
+        );
+        expect(sa.getJSON().roomsData.knock["!knock:bar"].knock_state).toBe(initKnockState);
+
+        // Room transitions from knock to join (e.g., after approval and joining)
+        const joinState = {
+            account_data: { events: [] },
+            ephemeral: { events: [] },
+            unread_notifications: {},
+            state: {
+                events: [member("bob", KnownMembership.Join)],
+            },
+        };
+
+        const syncResponse = {
+            next_batch: "abc",
+            rooms: {
+                join: {
+                    "!knock:bar": joinState,
+                },
+                invite: {},
+                leave: {},
+            },
+        } as unknown as ISyncResponse;
+
+        sa.accumulate(syncResponse);
+
+        expect(sa.getJSON().roomsData.knock["!knock:bar"]).toBeUndefined();
+        expect(sa.getJSON().roomsData.join["!knock:bar"].state?.events[0]?.content.membership).toEqual(
+            KnownMembership.Join,
+        );
+    });
+
     it("should accumulate read receipts", () => {
         const receipt1 = {
             type: "m.receipt",
@@ -795,7 +839,7 @@ describe("SyncAccumulator", function () {
         }
 
         afterEach(() => {
-            jest.spyOn(globalThis.Date, "now").mockRestore();
+            vi.spyOn(globalThis.Date, "now").mockRestore();
         });
 
         it("should copy summary properties", function () {
@@ -852,11 +896,11 @@ describe("SyncAccumulator", function () {
             const delta = 1000;
             const startingTs = 1000;
 
-            jest.spyOn(globalThis.Date, "now").mockReturnValue(startingTs);
+            vi.spyOn(globalThis.Date, "now").mockReturnValue(startingTs);
 
             sa.accumulate(RES_WITH_AGE);
 
-            jest.spyOn(globalThis.Date, "now").mockReturnValue(startingTs + delta);
+            vi.spyOn(globalThis.Date, "now").mockReturnValue(startingTs + delta);
 
             const output = sa.getJSON();
             expect(output.roomsData.join["!foo:bar"].timeline.events[0].unsigned?.age).toEqual(
@@ -1022,6 +1066,67 @@ describe("SyncAccumulator", function () {
             expect(roomData.timeline?.events.find((e) => e.type === "m.room.member")?.content.membership).toEqual(
                 KnownMembership.Join,
             );
+        });
+    });
+
+    describe("MSC4354 sticky events", () => {
+        function stickyEvent(ts = 0): IStickyEvent {
+            const msgData = msg("test", "test text");
+            return {
+                ...msgData,
+                msc4354_sticky: {
+                    duration_ms: 1000,
+                },
+                origin_server_ts: ts,
+            };
+        }
+
+        beforeAll(() => {
+            vi.useFakeTimers();
+        });
+
+        afterAll(() => {
+            vi.useRealTimers();
+        });
+
+        it("should accumulate sticky events", () => {
+            vi.setSystemTime(0);
+            const ev = stickyEvent();
+            sa.accumulate(
+                syncSkeleton({
+                    msc4354_sticky: {
+                        events: [ev],
+                    },
+                }),
+            );
+            expect(sa.getJSON().roomsData[Category.Join]["!foo:bar"].msc4354_sticky?.events).toEqual([ev]);
+        });
+        it("should clear stale sticky events", () => {
+            vi.setSystemTime(1000);
+            const ev = stickyEvent(1000);
+            sa.accumulate(
+                syncSkeleton({
+                    msc4354_sticky: {
+                        events: [ev],
+                    },
+                }),
+            );
+            expect(sa.getJSON().roomsData[Category.Join]["!foo:bar"].msc4354_sticky?.events).toEqual([ev]);
+            vi.setSystemTime(2000); // Expire the event
+            sa.accumulate(syncSkeleton({}));
+            expect(sa.getJSON().roomsData[Category.Join]["!foo:bar"].msc4354_sticky?.events).toBeUndefined();
+        });
+
+        it("clears stale sticky events that pretend to be from the distant future", () => {
+            vi.setSystemTime(0);
+            const eventFarInTheFuture = stickyEvent(999999999999);
+            sa.accumulate(syncSkeleton({ msc4354_sticky: { events: [eventFarInTheFuture] } }));
+            expect(sa.getJSON().roomsData[Category.Join]["!foo:bar"].msc4354_sticky?.events).toEqual([
+                eventFarInTheFuture,
+            ]);
+            vi.setSystemTime(1000); // Expire the event
+            sa.accumulate(syncSkeleton({}));
+            expect(sa.getJSON().roomsData[Category.Join]["!foo:bar"].msc4354_sticky?.events).toBeUndefined();
         });
     });
 });

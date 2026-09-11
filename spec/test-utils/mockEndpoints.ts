@@ -14,39 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import fetchMock from "fetch-mock-jest";
+import fetchMock from "@fetch-mock/vitest";
 
-import { KeyBackupInfo } from "../../src/crypto-api";
+import { type KeyBackupInfo } from "../../src/crypto-api";
 
 /**
  * Mock out the endpoints that the js-sdk calls when we call `MatrixClient.start()`.
  *
  * @param homeserverUrl - the homeserver url for the client under test
+ * @param userId - the local user's ID. Defaults to `@alice:localhost`.
  */
-export function mockInitialApiRequests(homeserverUrl: string) {
-    fetchMock.getOnce(
-        new URL("/_matrix/client/versions", homeserverUrl).toString(),
-        { versions: ["v1.1"] },
-        { overwriteRoutes: true },
-    );
-    fetchMock.getOnce(
-        new URL("/_matrix/client/v3/pushrules/", homeserverUrl).toString(),
-        {},
-        { overwriteRoutes: true },
-    );
+export function mockInitialApiRequests(homeserverUrl: string, userId: string = "@alice:localhost") {
+    fetchMock.getOnce(new URL("/_matrix/client/versions", homeserverUrl).toString(), { versions: ["v1.1"] });
+    fetchMock.getOnce(new URL("/_matrix/client/v3/pushrules/", homeserverUrl).toString(), {});
     fetchMock.postOnce(
-        new URL("/_matrix/client/v3/user/%40alice%3Alocalhost/filter", homeserverUrl).toString(),
+        new URL(`/_matrix/client/v3/user/${encodeURIComponent(userId)}/filter`, homeserverUrl).toString(),
         { filter_id: "fid" },
-        { overwriteRoutes: true },
+    );
+    fetchMock.getOnce(
+        new URL(`/_matrix/client/v3/user/${encodeURIComponent(userId)}/filter/fid`, homeserverUrl).toString(),
+        { filter_id: "fid" },
     );
 }
 
 /**
- * Mock the requests needed to set up cross signing
+ * Mock the requests needed to set up cross signing, besides those provided by {@link E2EKeyReceiver}.
  *
  * Return 404 error for `GET _matrix/client/v3/user/:userId/account_data/:type` request
- * Return `{}` for `POST _matrix/client/v3/keys/signatures/upload` request (named `upload-sigs` for fetchMock check)
- * Return `{}` for `POST /_matrix/client/(unstable|v3)/keys/device_signing/upload` request (named `upload-keys` for fetchMock check)
  */
 export function mockSetupCrossSigningRequests(): void {
     // have account_data requests return an empty object
@@ -54,19 +48,6 @@ export function mockSetupCrossSigningRequests(): void {
         status: 404,
         body: { errcode: "M_NOT_FOUND", error: "Account data not found." },
     });
-
-    // we expect a request to upload signatures for our device ...
-    fetchMock.post({ url: "path:/_matrix/client/v3/keys/signatures/upload", name: "upload-sigs" }, {});
-
-    // ... and one to upload the cross-signing keys (with UIA)
-    fetchMock.post(
-        // legacy crypto uses /unstable/; /v3/ is correct
-        {
-            url: new RegExp("/_matrix/client/(unstable|v3)/keys/device_signing/upload"),
-            name: "upload-keys",
-        },
-        {},
-    );
 }
 
 /**
@@ -79,24 +60,30 @@ export function mockSetupCrossSigningRequests(): void {
  * @param backupVersion - The backup version that will be returned by `POST room_keys/version`.
  */
 export function mockSetupMegolmBackupRequests(backupVersion: string): void {
-    fetchMock.get("path:/_matrix/client/v3/room_keys/version", {
-        status: 404,
-        body: {
-            errcode: "M_NOT_FOUND",
-            error: "No current backup version",
+    fetchMock.get(
+        "path:/_matrix/client/v3/room_keys/version",
+        {
+            status: 404,
+            body: {
+                errcode: "M_NOT_FOUND",
+                error: "No current backup version",
+            },
         },
-    });
+        { name: "room-keys-version" },
+    );
 
-    fetchMock.post("path:/_matrix/client/v3/room_keys/version", (url, request) => {
-        const backupData: KeyBackupInfo = JSON.parse((request.body as string) ?? "{}");
-        backupData.version = backupVersion;
-        backupData.count = 0;
-        backupData.etag = "zer";
-        fetchMock.get("path:/_matrix/client/v3/room_keys/version", backupData, {
-            overwriteRoutes: true,
-        });
-        return {
-            version: backupVersion,
-        };
-    });
+    fetchMock.post(
+        "path:/_matrix/client/v3/room_keys/version",
+        (callLog) => {
+            const backupData: KeyBackupInfo = JSON.parse((callLog.options.body as string) ?? "{}");
+            backupData.version = backupVersion;
+            backupData.count = 0;
+            backupData.etag = "zer";
+            fetchMock.modifyRoute("room-keys-version", { response: backupData });
+            return {
+                version: backupVersion,
+            };
+        },
+        { name: "post-room-keys-version" },
+    );
 }

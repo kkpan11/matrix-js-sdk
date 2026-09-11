@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { EventTimeline, IAddEventOptions } from "./event-timeline.ts";
-import { MatrixEvent } from "./event.ts";
+import { EventTimeline, type IAddEventOptions } from "./event-timeline.ts";
+import { type MatrixEvent } from "./event.ts";
 import { logger } from "../logger.ts";
-import { Room, RoomEvent } from "./room.ts";
-import { Filter } from "../filter.ts";
-import { RoomState } from "./room-state.ts";
+import { type Room, RoomEvent } from "./room.ts";
+import { type Filter } from "../filter.ts";
+import { type RoomState } from "./room-state.ts";
 import { TypedEventEmitter } from "./typed-event-emitter.ts";
 import { RelationsContainer } from "./relations-container.ts";
-import { MatrixClient } from "../client.ts";
-import { Thread, ThreadFilterType } from "./thread.ts";
+import { type MatrixClient } from "../client.ts";
+import { type Thread, type ThreadFilterType } from "./thread.ts";
 
 const DEBUG = true;
 
@@ -57,14 +57,18 @@ export interface IRoomTimelineData {
     liveEvent?: boolean;
 }
 
-export interface IAddEventToTimelineOptions
-    extends Pick<IAddEventOptions, "toStartOfTimeline" | "roomState" | "timelineWasEmpty" | "addToState"> {
+export interface IAddEventToTimelineOptions extends Pick<
+    IAddEventOptions,
+    "toStartOfTimeline" | "roomState" | "timelineWasEmpty" | "addToState"
+> {
     /** Whether the sync response came from cache */
     fromCache?: boolean;
 }
 
-export interface IAddLiveEventOptions
-    extends Pick<IAddEventToTimelineOptions, "fromCache" | "roomState" | "timelineWasEmpty" | "addToState"> {
+export interface IAddLiveEventOptions extends Pick<
+    IAddEventToTimelineOptions,
+    "fromCache" | "roomState" | "timelineWasEmpty" | "addToState"
+> {
     /** Applies to events in the timeline only. If this is 'replace' then if a
      * duplicate is encountered, the event passed to this function will replace
      * the existing event in the timeline. If this is not specified, or is
@@ -522,9 +526,9 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
                 // that would happen, so I'm going to ignore it for now.
                 //
                 if (existingTimeline == neighbour) {
-                    debuglog("Event " + eventId + " in neighbouring timeline - " + "switching to " + existingTimeline);
+                    debuglog("Event " + eventId + " in neighbouring timeline - switching to " + existingTimeline);
                 } else {
-                    debuglog("Event " + eventId + " already in a different " + "timeline " + existingTimeline);
+                    debuglog("Event " + eventId + " already in a different timeline " + existingTimeline);
                 }
                 timeline = existingTimeline;
                 continue;
@@ -578,7 +582,7 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
             if (direction === EventTimeline.FORWARDS && timeline === this.liveTimeline) {
                 logger.warn({ lastEventWasNew, didUpdate }); // for debugging
                 logger.warn(
-                    `Refusing to set forwards pagination token of live timeline ` + `${timeline} to ${paginationToken}`,
+                    `Refusing to set forwards pagination token of live timeline ${timeline} to ${paginationToken}`,
                 );
                 return;
             }

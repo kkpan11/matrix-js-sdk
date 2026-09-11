@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 import { ConnectionStats } from "./connectionStats.ts";
-import { StatsReportEmitter } from "./statsReportEmitter.ts";
-import { ByteSend, ByteSentStatsReport, TrackID } from "./statsReport.ts";
+import { type StatsReportEmitter } from "./statsReportEmitter.ts";
+import { type ByteSend, type ByteSentStatsReport, type TrackID } from "./statsReport.ts";
 import { ConnectionStatsBuilder } from "./connectionStatsBuilder.ts";
 import { TransportStatsBuilder } from "./transportStatsBuilder.ts";
 import { MediaSsrcHandler } from "./media/mediaSsrcHandler.ts";
@@ -25,7 +25,7 @@ import { MediaTrackStatsHandler } from "./media/mediaTrackStatsHandler.ts";
 import { TrackStatsBuilder } from "./trackStatsBuilder.ts";
 import { ConnectionStatsReportBuilder } from "./connectionStatsReportBuilder.ts";
 import { ValueFormatter } from "./valueFormatter.ts";
-import { CallStatsReportSummary } from "./callStatsReportSummary.ts";
+import { type CallStatsReportSummary } from "./callStatsReportSummary.ts";
 import { logger } from "../../logger.ts";
 import { CallFeedStatsReporter } from "./callFeedStatsReporter.ts";
 
@@ -56,7 +56,7 @@ export class CallStatsReportGatherer {
             receivedVideoMedia: 0,
             audioTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0, concealedAudio: 0, totalAudio: 0 },
             videoTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0, concealedAudio: 0, totalAudio: 0 },
-        } as CallStatsReportSummary;
+        } satisfies CallStatsReportSummary;
         if (this.isActive) {
             const statsPromise = this.pc.getStats();
             if (typeof statsPromise?.then === "function") {
@@ -96,7 +96,7 @@ export class CallStatsReportGatherer {
     }
 
     private processStatsReport(groupCallId: string, localUserId: string): void {
-        const byteSentStatsReport: ByteSentStatsReport = new Map<TrackID, ByteSend>() as ByteSentStatsReport;
+        const byteSentStatsReport: ByteSentStatsReport = new Map<TrackID, ByteSend>();
         byteSentStatsReport.callId = this.callId;
         byteSentStatsReport.opponentMemberId = this.opponentMemberId;
 

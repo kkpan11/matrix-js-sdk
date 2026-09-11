@@ -14,20 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
-import fetchMock from "fetch-mock-jest";
-import { Mocked } from "jest-mock";
+import fetchMock from "@fetch-mock/vitest";
 import { KeysClaimRequest, UserId } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type Mocked } from "vitest";
 
+import type * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 import { OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
 import { KeyClaimManager } from "../../../src/rust-crypto/KeyClaimManager";
 import { TypedEventEmitter } from "../../../src/models/typed-event-emitter";
-import { HttpApiEvent, HttpApiEventHandlerMap, MatrixHttpApi } from "../../../src";
+import { type HttpApiEvent, type HttpApiEventHandlerMap, MatrixHttpApi } from "../../../src";
 import { logger, LogSpan } from "../../../src/logger";
-
-afterEach(() => {
-    fetchMock.mockReset();
-});
 
 describe("KeyClaimManager", () => {
     /* for these tests, we connect a KeyClaimManager to a mock OlmMachine, and a real OutgoingRequestProcessor
@@ -49,11 +45,11 @@ describe("KeyClaimManager", () => {
         });
 
         olmMachine = {
-            getMissingSessions: jest.fn(),
-            markRequestAsSent: jest.fn(),
+            getMissingSessions: vi.fn(),
+            markRequestAsSent: vi.fn(),
         } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
 
-        const outgoingRequestProcessor = new OutgoingRequestProcessor(olmMachine, httpApi);
+        const outgoingRequestProcessor = new OutgoingRequestProcessor(logger, olmMachine, httpApi);
 
         keyClaimManager = new KeyClaimManager(olmMachine, outgoingRequestProcessor);
     });
@@ -74,7 +70,8 @@ describe("KeyClaimManager", () => {
                     // ...  and we now resolve the original promise with the resolver for that second promise.
                     resolveCalledPromise(resolveCompletePromise);
                 });
-                return completePromise;
+                await completePromise;
+                return true;
             });
         });
     }
@@ -91,7 +88,7 @@ describe("KeyClaimManager", () => {
         fetchMock.postOnce("https://example.com/_matrix/client/v3/keys/claim", '{ "k": "v" }');
 
         // also stub out olmMachine.markRequestAsSent
-        olmMachine.markRequestAsSent.mockResolvedValueOnce(undefined);
+        olmMachine.markRequestAsSent.mockResolvedValueOnce(true);
 
         // fire off the request
         await keyClaimManager.ensureSessionsForUsers(new LogSpan(logger, "test"), [u1, u2]);
@@ -143,7 +140,7 @@ describe("KeyClaimManager", () => {
         const calledWith = olmMachine.getMissingSessions.mock.calls[0][0].map((u) => u.toString());
         expect(calledWith).toEqual([u1.toString()]);
         expect(olmMachine.getMissingSessions).toHaveBeenCalledTimes(1);
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveFetchedTimes(1, "https://example.com/_matrix/client/v3/keys/claim");
         expect(req1Resolved).toBe(false);
         expect(req2Resolved).toBe(false);
 
@@ -157,7 +154,7 @@ describe("KeyClaimManager", () => {
         const calledWith2 = olmMachine.getMissingSessions.mock.calls[1][0].map((u) => u.toString());
         expect(calledWith2).toEqual([u2.toString()]);
         expect(olmMachine.getMissingSessions).toHaveBeenCalledTimes(2);
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveFetchedTimes(2, "https://example.com/_matrix/client/v3/keys/claim");
         expect(req1Resolved).toBe(true);
         expect(req2Resolved).toBe(false);
 

@@ -29,10 +29,10 @@ describe("Beacon content helpers", () => {
     describe("makeBeaconInfoContent()", () => {
         const mockDateNow = 123456789;
         beforeEach(() => {
-            jest.spyOn(globalThis.Date, "now").mockReturnValue(mockDateNow);
+            vi.spyOn(globalThis.Date, "now").mockReturnValue(mockDateNow);
         });
         afterAll(() => {
-            jest.spyOn(globalThis.Date, "now").mockRestore();
+            vi.spyOn(globalThis.Date, "now").mockRestore();
         });
         it("create fully defined event content", () => {
             expect(makeBeaconInfoContent(1234, true, "nice beacon_info", LocationAssetType.Pin)).toEqual({
@@ -183,28 +183,43 @@ describe("Topic content helpers", () => {
         it("creates fully defined event content without html", () => {
             expect(makeTopicContent("pizza")).toEqual({
                 topic: "pizza",
-                [M_TOPIC.name]: [
-                    {
-                        body: "pizza",
-                        mimetype: "text/plain",
-                    },
-                ],
+                [M_TOPIC.name]: {
+                    "m.text": [
+                        {
+                            body: "pizza",
+                            mimetype: "text/plain",
+                        },
+                    ],
+                },
             });
         });
 
         it("creates fully defined event content with html", () => {
             expect(makeTopicContent("pizza", "<b>pizza</b>")).toEqual({
                 topic: "pizza",
-                [M_TOPIC.name]: [
-                    {
-                        body: "pizza",
-                        mimetype: "text/plain",
-                    },
-                    {
-                        body: "<b>pizza</b>",
-                        mimetype: "text/html",
-                    },
-                ],
+                [M_TOPIC.name]: {
+                    "m.text": [
+                        {
+                            body: "<b>pizza</b>",
+                            mimetype: "text/html",
+                        },
+                        {
+                            body: "pizza",
+                            mimetype: "text/plain",
+                        },
+                    ],
+                },
+            });
+        });
+
+        it("creates an empty event when the topic is falsey", () => {
+            expect(makeTopicContent(undefined)).toEqual({
+                topic: undefined,
+                [M_TOPIC.name]: { "m.text": [] },
+            });
+            expect(makeTopicContent(null)).toEqual({
+                topic: null,
+                [M_TOPIC.name]: { "m.text": [] },
             });
         });
     });
@@ -214,11 +229,13 @@ describe("Topic content helpers", () => {
             expect(
                 parseTopicContent({
                     topic: "pizza",
-                    [M_TOPIC.name]: [
-                        {
-                            body: "pizza",
-                        },
-                    ],
+                    [M_TOPIC.name]: {
+                        "m.text": [
+                            {
+                                body: "pizza",
+                            },
+                        ],
+                    },
                 }),
             ).toEqual({
                 text: "pizza",
@@ -229,12 +246,14 @@ describe("Topic content helpers", () => {
             expect(
                 parseTopicContent({
                     topic: "pizza",
-                    [M_TOPIC.name]: [
-                        {
-                            body: "pizza",
-                            mimetype: "text/plain",
-                        },
-                    ],
+                    [M_TOPIC.name]: {
+                        "m.text": [
+                            {
+                                body: "pizza",
+                                mimetype: "text/plain",
+                            },
+                        ],
+                    },
                 }),
             ).toEqual({
                 text: "pizza",
@@ -245,16 +264,62 @@ describe("Topic content helpers", () => {
             expect(
                 parseTopicContent({
                     topic: "pizza",
-                    [M_TOPIC.name]: [
-                        {
-                            body: "<b>pizza</b>",
-                            mimetype: "text/html",
-                        },
-                    ],
+                    [M_TOPIC.name]: {
+                        "m.text": [
+                            {
+                                body: "<b>pizza</b>",
+                                mimetype: "text/html",
+                            },
+                        ],
+                    },
                 }),
             ).toEqual({
                 text: "pizza",
                 html: "<b>pizza</b>",
+            });
+        });
+
+        it("parses legacy event content", () => {
+            expect(
+                parseTopicContent({
+                    topic: "pizza",
+                }),
+            ).toEqual({
+                text: "pizza",
+            });
+        });
+
+        // TODO delete this test and re-enable the next one after support for the invalid form is removed
+        //      https://github.com/matrix-org/matrix-js-sdk/pull/4984#pullrequestreview-3174251065
+        it("parses malformed event content with html topic", () => {
+            expect(
+                parseTopicContent({
+                    "topic": "pizza",
+                    "m.topic": [
+                        {
+                            body: "<b>pizza</b>",
+                            mimetype: "text/html",
+                        },
+                    ] as any,
+                }),
+            ).toEqual({
+                text: "pizza",
+                html: "<b>pizza</b>",
+            });
+        });
+        it.skip("uses legacy event content when new topic key is invalid", () => {
+            expect(
+                parseTopicContent({
+                    "topic": "pizza",
+                    "m.topic": [
+                        {
+                            body: "<b>pizza</b>",
+                            mimetype: "text/html",
+                        },
+                    ] as any,
+                }),
+            ).toEqual({
+                text: "pizza",
             });
         });
     });

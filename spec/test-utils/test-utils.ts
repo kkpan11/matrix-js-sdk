@@ -1,25 +1,31 @@
-// eslint-disable-next-line no-restricted-imports
-import EventEmitter from "events";
+import mkdebug from "debug";
 
-// load olm before the sdk if possible
-import "../olm-loader";
-
-import { logger } from "../../src/logger";
-import { IContent, IEvent, IEventRelation, IUnsigned, MatrixEvent, MatrixEventEvent } from "../../src/models/event";
+import type EventEmitter from "node:events";
+import {
+    type IContent,
+    type IEvent,
+    type IEventRelation,
+    type IUnsigned,
+    MatrixEvent,
+    MatrixEventEvent,
+} from "../../src/models/event";
 import {
     ClientEvent,
     EventType,
-    IJoinedRoom,
-    IPusher,
-    ISyncResponse,
-    MatrixClient,
+    HistoryVisibility,
+    type IJoinedRoom,
+    type IPusher,
+    type ISyncResponse,
+    type MatrixClient,
     MsgType,
     RelationType,
 } from "../../src";
 import { SyncState } from "../../src/sync";
 import { eventMapperFor } from "../../src/event-mapper";
-import { TEST_ROOM_ID } from "./test-data";
-import { KnownMembership, Membership } from "../../src/@types/membership";
+import { TEST_ROOM_ID } from "./crypto-test-data";
+import { KnownMembership, type Membership } from "../../src/@types/membership";
+
+const debug = mkdebug("test-utils");
 
 /**
  * Return a promise that is resolved when the client next emits a
@@ -35,7 +41,7 @@ export function syncPromise(client: MatrixClient, count = 1): Promise<void> {
 
     const p = new Promise<void>((resolve) => {
         const cb = (state: SyncState) => {
-            logger.log(`${Date.now()} syncPromise(${count}): ${state}`);
+            debug(`syncPromise(${count}): ${state}`);
             if (state === SyncState.Syncing) {
                 resolve();
             } else {
@@ -51,13 +57,22 @@ export function syncPromise(client: MatrixClient, count = 1): Promise<void> {
 }
 
 /**
- * Return a sync response which contains a single room (by default TEST_ROOM_ID), with the members given
- * @param roomMembers
- * @param roomId
+ * Return a sync response which contains a single room (by default `TEST_ROOM_ID`), with the members given
+ * and history visibility set to `shared`.
  *
- * @returns the sync response
+ * @param roomMembers - An array of user IDs representing the members of the room.
+ * @param roomHistoryVisibility - The history visibility setting for the room. Defaults to `shared`.
+ * @param roomId - The ID of the room. Defaults to `TEST_ROOM_ID`.
+ * @param encryptStateEvents - A boolean indicating whether state events should be encrypted. Defaults to `false`.
+ *
+ * @returns The sync response object containing the room data.
  */
-export function getSyncResponse(roomMembers: string[], roomId = TEST_ROOM_ID): ISyncResponse {
+export function getSyncResponse(
+    roomMembers: string[],
+    roomHistoryVisibility: HistoryVisibility = HistoryVisibility.Shared,
+    roomId = TEST_ROOM_ID,
+    encryptStateEvents = false,
+): ISyncResponse {
     const roomResponse: IJoinedRoom = {
         summary: {
             "m.heroes": [],
@@ -71,7 +86,16 @@ export function getSyncResponse(roomMembers: string[], roomId = TEST_ROOM_ID): I
                     type: "m.room.encryption",
                     state_key: "",
                     content: {
-                        algorithm: "m.megolm.v1.aes-sha2",
+                        "algorithm": "m.megolm.v1.aes-sha2",
+                        "io.element.msc4362.encrypt_state_events": encryptStateEvents,
+                    },
+                }),
+                mkEventCustom({
+                    sender: roomMembers[0],
+                    type: "m.room.history_visibility",
+                    state_key: "",
+                    content: {
+                        history_visibility: roomHistoryVisibility,
                     },
                 }),
             ],
@@ -122,10 +146,10 @@ export function mock<T>(constr: { new (...args: any[]): T }, name: string): T {
         return "mock" + (name ? " of " + name : "");
     };
     for (const key of Object.getOwnPropertyNames(constr.prototype)) {
-        // eslint-disable-line guard-for-in
         try {
+            // oxlint-disable-next-line unicorn/no-instanceof-builtins
             if (constr.prototype[key] instanceof Function) {
-                result[key] = jest.fn();
+                result[key] = vi.fn();
             }
         } catch {
             // Direct access to some non-function fields of DOM prototypes may
@@ -169,7 +193,7 @@ export function mkEvent(opts: IEventOpts & { event?: boolean }, client?: MatrixC
         throw new Error("Missing .type or .content =>" + JSON.stringify(opts));
     }
     const event: Partial<IEvent> = {
-        type: opts.type as string,
+        type: opts.type,
         room_id: opts.room,
         sender: opts.sender || opts.user, // opts.user for backwards-compat
         content: opts.content,
@@ -516,25 +540,25 @@ export async function awaitDecryption(
     // already
     if (event.getClearContent() !== null) {
         if (waitOnDecryptionFailure && event.isDecryptionFailure()) {
-            logger.log(`${Date.now()}: event ${event.getId()} got decryption error; waiting`);
+            debug(`event ${event.getId()} got decryption error; waiting`);
         } else {
             return event;
         }
     } else {
-        logger.log(`${Date.now()}: event ${event.getId()} is not yet decrypted; waiting`);
+        debug(`event ${event.getId()} is not yet decrypted; waiting`);
     }
 
     return new Promise((resolve) => {
         if (waitOnDecryptionFailure) {
             event.on(MatrixEventEvent.Decrypted, (ev, err) => {
-                logger.log(`${Date.now()}: MatrixEventEvent.Decrypted for event ${event.getId()}: ${err ?? "success"}`);
+                debug(`MatrixEventEvent.Decrypted for event ${event.getId()}: ${err ?? "success"}`);
                 if (!err) {
                     resolve(ev);
                 }
             });
         } else {
             event.once(MatrixEventEvent.Decrypted, (ev, err) => {
-                logger.log(`${Date.now()}: MatrixEventEvent.Decrypted for event ${event.getId()}: ${err ?? "success"}`);
+                debug(`MatrixEventEvent.Decrypted for event ${event.getId()}: ${err ?? "success"}`);
                 resolve(ev);
             });
         }
@@ -552,19 +576,20 @@ export const mkPusher = (extra: Partial<IPusher> = {}): IPusher => ({
     ...extra,
 });
 
-/**
- * a list of the supported crypto implementations, each with a callback to initialise that implementation
- * for the given client
- */
-export const CRYPTO_BACKENDS: Record<string, InitCrypto> = {};
-export type InitCrypto = (_: MatrixClient) => Promise<void>;
-
-CRYPTO_BACKENDS["rust-sdk"] = (client: MatrixClient) => client.initRustCrypto();
-if (globalThis.Olm) {
-    CRYPTO_BACKENDS["libolm"] = (client: MatrixClient) => client.initLegacyCrypto();
-}
-
 export const emitPromise = (e: EventEmitter, k: string): Promise<any> => new Promise((r) => e.once(k, r));
+
+/**
+ * Counts the number of times that an event was emitted.
+ */
+export class EventCounter {
+    public counter;
+    constructor(emitter: EventEmitter, event: string) {
+        this.counter = 0;
+        emitter.on(event, () => {
+            this.counter++;
+        });
+    }
+}
 
 /**
  * Advance the fake timers in a loop until the given promise resolves or rejects.
@@ -579,9 +604,106 @@ export async function advanceTimersUntil<T>(promise: Promise<T>): Promise<T> {
         resolved = true;
     });
 
+    // oxlint-disable-next-line no-unmodified-loop-condition
     while (!resolved) {
-        await jest.advanceTimersByTimeAsync(1);
+        await vi.advanceTimersByTimeAsync(1);
     }
 
     return await promise;
+}
+
+export function jestFakeTimersAreEnabled(): boolean {
+    return Object.prototype.hasOwnProperty.call(setTimeout, "clock");
+}
+
+/**
+ * Run `callback` in a loop, until it returns a successful result (i.e. it does not throw), or we reach a timeout
+ *
+ * Based on the function of the same name in the {@link https://testing-library.com/docs/dom-testing-library/api-async/#waitfor DOM testing library}.
+ *
+ * @param callback - The function to call to check if we can proceed. If it returns a result (including a falsey one),
+ *   `waitFor` returns that result. If it throws, `waitFor` continues to wait.
+ *
+ *   May return a promise, in which case no further checks are done until the promise resolves.
+ *
+ * @param timeout - The time to wait for, overall, in ms. If `callback` still hasn't returned a successful result after
+ *    this time, `waitFor` will throw an error.
+ *
+ *    Defaults to 1000.
+ *
+ * @param interval - How often to call `callback`. Defaults to 50.
+ */
+export function waitFor<T>(
+    callback: () => Promise<T> | T,
+    {
+        timeout = 1000,
+        interval = 50,
+    }: {
+        timeout?: number;
+        interval?: number;
+    } = {},
+): Promise<T> {
+    return new Promise((resolve, reject) => {
+        let lastError: any;
+        let finished = false;
+        let intervalId: ReturnType<typeof setTimeout> | undefined;
+        let promisePending = false;
+
+        const overallTimeoutTimer = setTimeout(handleTimeout, timeout);
+        const usingJestFakeTimers = jestFakeTimersAreEnabled();
+        if (usingJestFakeTimers) {
+            checkCallback();
+
+            // oxlint-disable-next-line no-unmodified-loop-condition
+            while (!finished) {
+                vi.advanceTimersByTime(interval);
+
+                // Could have timed-out
+                if (finished) break;
+
+                checkCallback();
+            }
+        } else {
+            intervalId = setInterval(checkCallback, interval);
+            checkCallback();
+        }
+
+        function checkCallback() {
+            if (promisePending) {
+                // still waiting for the previous check
+                return;
+            }
+
+            async function doCheck() {
+                try {
+                    const result = await callback();
+                    onDone();
+                    resolve(result);
+                } catch (error) {
+                    // Save the most recent callback error to reject the promise with it in the event of a timeout
+                    lastError = error;
+                }
+            }
+
+            promisePending = true;
+            doCheck().finally(() => {
+                promisePending = false;
+            });
+        }
+
+        function onDone(): void {
+            finished = true;
+            clearTimeout(overallTimeoutTimer);
+            if (intervalId !== undefined) clearInterval(intervalId);
+        }
+
+        function handleTimeout() {
+            onDone();
+            if (lastError) {
+                reject(lastError);
+            } else {
+                reject(new Error("Timed out in waitFor."));
+            }
+        }
+    });
 }

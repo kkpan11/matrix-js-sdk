@@ -14,15 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import fetchMock from "fetch-mock-jest";
+import fetchMock from "@fetch-mock/vitest";
 
 import * as utils from "../test-utils/test-utils";
 import { RoomMember, RoomMemberEvent } from "../../src/models/room-member";
 import {
     createClient,
-    EventType,
-    MatrixClient,
-    RoomState,
+    type MatrixClient,
+    MatrixEvent,
+    type RoomState,
     UNSTABLE_MSC2666_MUTUAL_ROOMS,
     UNSTABLE_MSC2666_QUERY_MUTUAL_ROOMS,
     UNSTABLE_MSC2666_SHARED_ROOMS,
@@ -65,160 +65,68 @@ describe("RoomMember", function () {
             const url = member.getAvatarUrl(hsUrl, 64, 64, "crop", false, false);
             expect(url).toEqual(null);
         });
+
+        it("should return unauthenticated media URL if useAuthentication is not set", function () {
+            member.events.member = utils.mkEvent({
+                event: true,
+                type: "m.room.member",
+                skey: userA,
+                room: roomId,
+                user: userA,
+                content: {
+                    membership: KnownMembership.Join,
+                    avatar_url: "mxc://flibble/wibble",
+                },
+            });
+            const url = member.getAvatarUrl(hsUrl, 1, 1, "", false, false);
+            // Check for unauthenticated media prefix
+            expect(url?.indexOf("/_matrix/media/v3/")).not.toEqual(-1);
+        });
+
+        it("should return authenticated media URL if useAuthentication=true", function () {
+            member.events.member = utils.mkEvent({
+                event: true,
+                type: "m.room.member",
+                skey: userA,
+                room: roomId,
+                user: userA,
+                content: {
+                    membership: KnownMembership.Join,
+                    avatar_url: "mxc://flibble/wibble",
+                },
+            });
+            const url = member.getAvatarUrl(hsUrl, 1, 1, "", false, false, true);
+            // Check for authenticated media prefix
+            expect(url?.indexOf("/_matrix/client/v1/media/")).not.toEqual(-1);
+        });
     });
 
-    describe("setPowerLevelEvent", function () {
-        it("should set 'powerLevel' and 'powerLevelNorm'.", function () {
-            const event = utils.mkEvent({
-                type: "m.room.power_levels",
-                room: roomId,
-                user: userA,
-                content: {
-                    users_default: 20,
-                    users: {
-                        "@bertha:bar": 200,
-                        "@invalid:user": 10, // shouldn't barf on this.
-                    },
-                },
-                event: true,
-            });
-            member.setPowerLevelEvent(event);
-            expect(member.powerLevel).toEqual(20);
-            expect(member.powerLevelNorm).toEqual(10);
-
-            const memberB = new RoomMember(roomId, userB);
-            memberB.setPowerLevelEvent(event);
-            expect(memberB.powerLevel).toEqual(200);
-            expect(memberB.powerLevelNorm).toEqual(100);
-        });
-
-        it("should emit 'RoomMember.powerLevel' if the power level changes.", function () {
-            const event = utils.mkEvent({
-                type: "m.room.power_levels",
-                room: roomId,
-                user: userA,
-                content: {
-                    users_default: 20,
-                    users: {
-                        "@bertha:bar": 200,
-                        "@invalid:user": 10, // shouldn't barf on this.
-                    },
-                },
-                event: true,
-            });
-            let emitCount = 0;
-
-            member.on(RoomMemberEvent.PowerLevel, function (emitEvent, emitMember) {
-                emitCount += 1;
-                expect(emitMember).toEqual(member);
-                expect(emitEvent).toEqual(event);
-            });
-
-            member.setPowerLevelEvent(event);
-            expect(emitCount).toEqual(1);
-            member.setPowerLevelEvent(event); // no-op
-            expect(emitCount).toEqual(1);
-        });
-
-        it("should honour power levels of zero.", function () {
-            const event = utils.mkEvent({
-                type: "m.room.power_levels",
-                room: roomId,
-                user: userA,
-                content: {
-                    users_default: 20,
-                    users: {
-                        "@alice:bar": 0,
-                    },
-                },
-                event: true,
-            });
-            let emitCount = 0;
-
-            // set the power level to something other than zero or we
-            // won't get an event
-            member.powerLevel = 1;
-            member.on(RoomMemberEvent.PowerLevel, function (emitEvent, emitMember) {
-                emitCount += 1;
-                expect(emitMember.userId).toEqual("@alice:bar");
-                expect(emitMember.powerLevel).toEqual(0);
-                expect(emitEvent).toEqual(event);
-            });
-
-            member.setPowerLevelEvent(event);
+    describe("setPowerLevel", function () {
+        it("should set 'powerLevel'.", function () {
+            member.setPowerLevel(0, new MatrixEvent());
             expect(member.powerLevel).toEqual(0);
-            expect(emitCount).toEqual(1);
+            member.setPowerLevel(200, new MatrixEvent());
+            expect(member.powerLevel).toEqual(200);
         });
 
-        it("should not honor string power levels.", function () {
-            const event = utils.mkEvent({
-                type: "m.room.power_levels",
-                room: roomId,
-                user: userA,
-                content: {
-                    users_default: 20,
-                    users: {
-                        "@alice:bar": "5",
-                    },
-                },
-                event: true,
-            });
-            let emitCount = 0;
+        it("should emit when power level set", function () {
+            const onEmit = vi.fn();
+            member.on(RoomMemberEvent.PowerLevel, onEmit);
 
-            member.on(RoomMemberEvent.PowerLevel, function (emitEvent, emitMember) {
-                emitCount += 1;
-                expect(emitMember.userId).toEqual("@alice:bar");
-                expect(emitMember.powerLevel).toEqual(20);
-                expect(emitEvent).toEqual(event);
-            });
+            const aMatrixEvent = new MatrixEvent();
+            member.setPowerLevel(10, aMatrixEvent);
 
-            member.setPowerLevelEvent(event);
-            expect(member.powerLevel).toEqual(20);
-            expect(emitCount).toEqual(1);
+            expect(onEmit).toHaveBeenCalledWith(aMatrixEvent, member);
         });
 
-        it("should no-op if given a non-state or unrelated event", () => {
-            const fn = jest.spyOn(member, "emit");
-            expect(fn).not.toHaveBeenCalledWith(RoomMemberEvent.PowerLevel);
-            member.setPowerLevelEvent(
-                utils.mkEvent({
-                    type: EventType.RoomPowerLevels,
-                    room: roomId,
-                    user: userA,
-                    content: {
-                        users_default: 20,
-                        users: {
-                            "@alice:bar": "5",
-                        },
-                    },
-                    skey: "invalid",
-                    event: true,
-                }),
-            );
-            const nonStateEv = utils.mkEvent({
-                type: EventType.RoomPowerLevels,
-                room: roomId,
-                user: userA,
-                content: {
-                    users_default: 20,
-                    users: {
-                        "@alice:bar": "5",
-                    },
-                },
-                event: true,
-            });
-            delete nonStateEv.event.state_key;
-            member.setPowerLevelEvent(nonStateEv);
-            member.setPowerLevelEvent(
-                utils.mkEvent({
-                    type: EventType.Sticker,
-                    room: roomId,
-                    user: userA,
-                    content: {},
-                    event: true,
-                }),
-            );
-            expect(fn).not.toHaveBeenCalledWith(RoomMemberEvent.PowerLevel);
+        it("should not emit if new power level is the same", function () {
+            const onEmit = vi.fn();
+            member.on(RoomMemberEvent.PowerLevel, onEmit);
+
+            const aMatrixEvent = new MatrixEvent();
+            member.setPowerLevel(0, aMatrixEvent);
+
+            expect(onEmit).not.toHaveBeenCalled();
         });
     });
 
@@ -539,7 +447,6 @@ describe("MutualRooms", () => {
     beforeEach(async () => {
         // anything that we don't have a specific matcher for silently returns a 404
         fetchMock.catch(404);
-        fetchMock.config.warnOnFallback = true;
 
         client = createClient({
             baseUrl: HS_URL,
@@ -550,8 +457,7 @@ describe("MutualRooms", () => {
     });
 
     afterEach(async () => {
-        await client.stopClient();
-        fetchMock.mockReset();
+        client.stopClient();
     });
 
     function enableFeature(feature: string) {
@@ -568,8 +474,8 @@ describe("MutualRooms", () => {
     it("supports the initial MSC version (shared rooms)", async () => {
         enableFeature(UNSTABLE_MSC2666_SHARED_ROOMS);
 
-        fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/shared_rooms/:user_id", (rawUrl) => {
-            const segments = rawUrl.split("/");
+        fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/shared_rooms/:user_id", (callLog) => {
+            const segments = callLog.url.split("/");
             const lastSegment = decodeURIComponent(segments[segments.length - 1]);
 
             expect(lastSegment).toEqual(QUERIED_USER);
@@ -587,8 +493,8 @@ describe("MutualRooms", () => {
     it("supports the renaming MSC version (mutual rooms)", async () => {
         enableFeature(UNSTABLE_MSC2666_MUTUAL_ROOMS);
 
-        fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms/:user_id", (rawUrl) => {
-            const segments = rawUrl.split("/");
+        fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms/:user_id", (callLog) => {
+            const segments = callLog.url.split("/");
             const lastSegment = decodeURIComponent(segments[segments.length - 1]);
 
             expect(lastSegment).toEqual(QUERIED_USER);
@@ -609,8 +515,8 @@ describe("MutualRooms", () => {
         });
 
         it("works with a simple response", async () => {
-            fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms", (rawUrl) => {
-                const url = new URL(rawUrl);
+            fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms", (callLog) => {
+                const url = new URL(callLog.url);
 
                 expect(url.searchParams.get("user_id")).toEqual(QUERIED_USER);
 
@@ -625,8 +531,8 @@ describe("MutualRooms", () => {
         });
 
         it("works with a paginated response", async () => {
-            fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms", (rawUrl) => {
-                const url = new URL(rawUrl);
+            fetchMock.get("express:/_matrix/client/unstable/uk.half-shot.msc2666/user/mutual_rooms", (callLog) => {
+                const url = new URL(callLog.url);
 
                 expect(url.searchParams.get("user_id")).toEqual(QUERIED_USER);
 

@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 import MockHttpBackend from "matrix-mock-request";
-import { Mocked } from "jest-mock";
+import fetchMock from "@fetch-mock/vitest";
+import { type Mocked } from "vitest";
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 import {
     KeysBackupRequest,
@@ -27,13 +28,19 @@ import {
     SignatureUploadRequest,
     UploadSigningKeysRequest,
     ToDeviceRequest,
+    type OutgoingRequest,
 } from "@matrix-org/matrix-sdk-crypto-wasm";
-import fetchMock from "fetch-mock-jest";
 
 import { TypedEventEmitter } from "../../../src";
-import { HttpApiEvent, HttpApiEventHandlerMap, IHttpOpts, MatrixHttpApi, UIAuthCallback } from "../../../src";
+import {
+    type HttpApiEvent,
+    type HttpApiEventHandlerMap,
+    type IHttpOpts,
+    MatrixHttpApi,
+    type UIAuthCallback,
+} from "../../../src";
 import { OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
-import { defer } from "../../../src/utils";
+import { logger } from "../../../src/logger.ts";
 
 describe("OutgoingRequestProcessor", () => {
     /** the OutgoingRequestProcessor implementation under test */
@@ -50,6 +57,7 @@ describe("OutgoingRequestProcessor", () => {
         return new Promise((resolve, _reject) => {
             olmMachine.markRequestAsSent.mockImplementationOnce(async () => {
                 resolve(undefined);
+                return true;
             });
         });
     }
@@ -66,10 +74,10 @@ describe("OutgoingRequestProcessor", () => {
         });
 
         olmMachine = {
-            markRequestAsSent: jest.fn(),
+            markRequestAsSent: vi.fn(),
         } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
 
-        processor = new OutgoingRequestProcessor(olmMachine, httpApi);
+        processor = new OutgoingRequestProcessor(logger, olmMachine, httpApi);
     });
 
     /* simple requests that map directly to the request body */
@@ -264,7 +272,7 @@ describe("OutgoingRequestProcessor", () => {
     });
 
     it("does not explode with unknown requests", async () => {
-        const outgoingRequest = { id: "5678", type: 987 };
+        const outgoingRequest = { id: "5678", type: 987 } as unknown as OutgoingRequest;
         const markSentCallPromise = awaitCallToMarkAsSent();
         await Promise.all([processor.makeOutgoingRequest(outgoingRequest), markSentCallPromise]);
         expect(olmMachine.markRequestAsSent).toHaveBeenCalledWith("5678", 987, "");
@@ -277,16 +285,16 @@ describe("OutgoingRequestProcessor", () => {
             new RustSdkCryptoJs.DeviceId("TEST_DEVICE"),
         );
 
-        const authRequestResultDefer = defer<string>();
+        const authRequestResultResolvers = Promise.withResolvers<string>();
 
         const authRequestCalledPromise = new Promise<void>((resolve) => {
             const mockHttpApi = {
                 authedRequest: async () => {
                     resolve();
-                    return await authRequestResultDefer.promise;
+                    return await authRequestResultResolvers.promise;
                 },
             } as unknown as Mocked<MatrixHttpApi<IHttpOpts & { onlyData: true }>>;
-            processor = new OutgoingRequestProcessor(olmMachine, mockHttpApi);
+            processor = new OutgoingRequestProcessor(logger, olmMachine, mockHttpApi);
         });
 
         // build a request
@@ -294,13 +302,13 @@ describe("OutgoingRequestProcessor", () => {
         const result = processor.makeOutgoingRequest(request);
 
         // wait for the HTTP request to be made
-        await authRequestCalledPromise;
+        await expect(authRequestCalledPromise).resolves.toBeUndefined();
 
         // while the HTTP request is in flight, the OlmMachine gets stopped.
         olmMachine.close();
 
         // the HTTP request completes...
-        authRequestResultDefer.resolve("{}");
+        authRequestResultResolvers.resolve("{}");
 
         // ... and `makeOutgoingRequest` resolves satisfactorily
         await result;
@@ -308,7 +316,7 @@ describe("OutgoingRequestProcessor", () => {
 
     describe("Should retry requests", () => {
         beforeEach(() => {
-            jest.useFakeTimers();
+            vi.useFakeTimers();
 
             // here we use another httpApi instance in order to use fetchMock
             const dummyEventEmitter = new TypedEventEmitter<HttpApiEvent, HttpApiEventHandlerMap>();
@@ -318,12 +326,11 @@ describe("OutgoingRequestProcessor", () => {
                 onlyData: true,
             });
 
-            processor = new OutgoingRequestProcessor(olmMachine, httpApi);
+            processor = new OutgoingRequestProcessor(logger, olmMachine, httpApi);
         });
 
         afterEach(() => {
-            jest.useRealTimers();
-            fetchMock.reset();
+            vi.useRealTimers();
         });
 
         describe("Should retry on retryable errors", () => {
@@ -347,17 +354,17 @@ describe("OutgoingRequestProcessor", () => {
                     const testBody = '{ "foo": "bar" }';
                     const outgoingRequest = new RequestClass("1234", testBody);
 
-                    fetchMock.mock(expectedPath, error, { method: expectedMethod });
+                    fetchMock.route(expectedPath, error, { method: expectedMethod });
 
                     const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
                     // Run all timers and wait for the request promise to resolve/reject
-                    await Promise.all([jest.runAllTimersAsync(), requestPromise.catch(() => {})]);
+                    await Promise.all([vi.runAllTimersAsync(), requestPromise.catch(() => {})]);
 
                     await expect(requestPromise).rejects.toThrow();
 
                     // Should have ultimately made 5 requests (1 initial + 4 retries)
-                    const calls = fetchMock.calls(expectedPath);
+                    const calls = fetchMock.callHistory.calls(expectedPath);
                     expect(calls).toHaveLength(5);
 
                     // The promise should have been rejected
@@ -380,11 +387,11 @@ describe("OutgoingRequestProcessor", () => {
 
             const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
-            await Promise.all([requestPromise.catch(() => {}), jest.runAllTimersAsync()]);
+            await Promise.all([requestPromise.catch(() => {}), vi.runAllTimersAsync()]);
 
             await expect(requestPromise).rejects.toThrow();
 
-            const calls = fetchMock.calls("express:/_matrix/client/v3/sendToDevice/:type/:txnId");
+            const calls = fetchMock.callHistory.calls("express:/_matrix/client/v3/sendToDevice/:type/:txnId");
             expect(calls).toHaveLength(1);
 
             // The promise should have been rejected
@@ -393,7 +400,7 @@ describe("OutgoingRequestProcessor", () => {
 
         it("should retry on Failed to fetch connection errors", async () => {
             let callCount = 0;
-            fetchMock.post("path:/_matrix/client/v3/keys/upload", (url, opts) => {
+            fetchMock.post("path:/_matrix/client/v3/keys/upload", (callLog) => {
                 callCount++;
                 if (callCount == 2) {
                     return {
@@ -409,9 +416,9 @@ describe("OutgoingRequestProcessor", () => {
 
             const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
-            await Promise.all([requestPromise, jest.runAllTimersAsync()]);
+            await Promise.all([requestPromise, vi.runAllTimersAsync()]);
 
-            const calls = fetchMock.calls("path:/_matrix/client/v3/keys/upload");
+            const calls = fetchMock.callHistory.calls("path:/_matrix/client/v3/keys/upload");
             expect(calls).toHaveLength(2);
             expect(olmMachine.markRequestAsSent).toHaveBeenCalled();
         });
@@ -421,7 +428,7 @@ describe("OutgoingRequestProcessor", () => {
             const testBody = '{ "messages": { "user": {"device": "bar" }}}';
             const outgoingRequest = new ToDeviceRequest("1234", "custom.type", "12345", testBody);
 
-            fetchMock.put("express:/_matrix/client/v3/sendToDevice/:type/:txnId", (url, opts) => {
+            fetchMock.put("express:/_matrix/client/v3/sendToDevice/:type/:txnId", (callLog) => {
                 callCount++;
                 if (callCount == 2) {
                     return {
@@ -435,9 +442,9 @@ describe("OutgoingRequestProcessor", () => {
 
             const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
-            await Promise.all([requestPromise, jest.runAllTimersAsync()]);
+            await Promise.all([requestPromise, vi.runAllTimersAsync()]);
 
-            const calls = fetchMock.calls("express:/_matrix/client/v3/sendToDevice/:type/:txnId");
+            const calls = fetchMock.callHistory.calls("express:/_matrix/client/v3/sendToDevice/:type/:txnId");
             expect(calls).toHaveLength(2);
             expect(olmMachine.markRequestAsSent).toHaveBeenCalled();
         });
@@ -447,7 +454,7 @@ describe("OutgoingRequestProcessor", () => {
             const testBody = '{ "foo": "bar" }';
             const outgoingRequest = new UploadSigningKeysRequest(testBody);
 
-            fetchMock.post("path:/_matrix/client/v3/keys/device_signing/upload", (url, opts) => {
+            fetchMock.post("path:/_matrix/client/v3/keys/device_signing/upload", (callLog) => {
                 callCount++;
                 if (callCount == 2) {
                     return {
@@ -463,9 +470,9 @@ describe("OutgoingRequestProcessor", () => {
             };
             const requestPromise = processor.makeOutgoingRequest(outgoingRequest, authCallback);
 
-            await Promise.all([requestPromise, jest.runAllTimersAsync()]);
+            await Promise.all([requestPromise, vi.runAllTimersAsync()]);
 
-            const calls = fetchMock.calls("path:/_matrix/client/v3/keys/device_signing/upload");
+            const calls = fetchMock.callHistory.calls("path:/_matrix/client/v3/keys/device_signing/upload");
             expect(calls).toHaveLength(2);
             // Will not mark as sent as it's a UIA request
         });
@@ -474,7 +481,7 @@ describe("OutgoingRequestProcessor", () => {
             const retryAfterMs = 5000;
             let callCount = 0;
 
-            fetchMock.post("path:/_matrix/client/v3/keys/upload", (url, opts) => {
+            fetchMock.post("path:/_matrix/client/v3/keys/upload", (callLog) => {
                 callCount++;
                 if (callCount == 2) {
                     return {
@@ -498,20 +505,20 @@ describe("OutgoingRequestProcessor", () => {
             const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
             // advanced by less than the retryAfterMs
-            await jest.advanceTimersByTimeAsync(retryAfterMs - 1000);
+            await vi.advanceTimersByTimeAsync(retryAfterMs - 1000);
 
             // should not have made a second request yet
             {
-                const calls = fetchMock.calls("path:/_matrix/client/v3/keys/upload");
+                const calls = fetchMock.callHistory.calls("path:/_matrix/client/v3/keys/upload");
                 expect(calls).toHaveLength(1);
             }
 
             // advanced by the remaining time
-            await jest.advanceTimersByTimeAsync(retryAfterMs + 1000);
+            await vi.advanceTimersByTimeAsync(retryAfterMs + 1000);
 
             await requestPromise;
 
-            const calls = fetchMock.calls("path:/_matrix/client/v3/keys/upload");
+            const calls = fetchMock.callHistory.calls("path:/_matrix/client/v3/keys/upload");
             expect(calls).toHaveLength(2);
             expect(olmMachine.markRequestAsSent).toHaveBeenCalled();
         });
@@ -536,12 +543,12 @@ describe("OutgoingRequestProcessor", () => {
                 const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
                 // Run all timers and wait for the request promise to resolve/reject
-                await Promise.all([jest.runAllTimersAsync(), requestPromise.catch(() => {})]);
+                await Promise.all([vi.runAllTimersAsync(), requestPromise.catch(() => {})]);
 
                 await expect(requestPromise).rejects.toThrow();
 
                 // Should have only tried once
-                const calls = fetchMock.calls(expectedPath);
+                const calls = fetchMock.callHistory.calls(expectedPath);
                 expect(calls).toHaveLength(1);
 
                 await expect(requestPromise).rejects.toThrow();
@@ -562,12 +569,12 @@ describe("OutgoingRequestProcessor", () => {
                 const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
                 // Run all timers and wait for the request promise to resolve/reject
-                await Promise.all([jest.runAllTimersAsync(), requestPromise.catch(() => {})]);
+                await Promise.all([vi.runAllTimersAsync(), requestPromise.catch(() => {})]);
 
                 await expect(requestPromise).rejects.toThrow();
 
                 // Should have only tried once
-                const calls = fetchMock.calls(expectedPath);
+                const calls = fetchMock.callHistory.calls(expectedPath);
                 expect(calls).toHaveLength(1);
                 await expect(requestPromise).rejects.toThrow();
             });
@@ -576,7 +583,7 @@ describe("OutgoingRequestProcessor", () => {
         describe("Should retry until it works", () => {
             it.each([1, 2, 3, 4])("should succeed if the call number %s is ok", async (successfulCall) => {
                 let callCount = 0;
-                fetchMock.post("path:/_matrix/client/v3/keys/upload", (url, opts) => {
+                fetchMock.post("path:/_matrix/client/v3/keys/upload", (callLog) => {
                     callCount++;
                     if (callCount == successfulCall) {
                         return {
@@ -595,9 +602,9 @@ describe("OutgoingRequestProcessor", () => {
 
                 const requestPromise = processor.makeOutgoingRequest(outgoingRequest);
 
-                await Promise.all([requestPromise, jest.runAllTimersAsync()]);
+                await Promise.all([requestPromise, vi.runAllTimersAsync()]);
 
-                const calls = fetchMock.calls("path:/_matrix/client/v3/keys/upload");
+                const calls = fetchMock.callHistory.calls("path:/_matrix/client/v3/keys/upload");
                 expect(calls).toHaveLength(successfulCall);
                 expect(olmMachine.markRequestAsSent).toHaveBeenCalled();
             });

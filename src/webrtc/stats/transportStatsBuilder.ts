@@ -1,4 +1,4 @@
-import { TransportStats } from "./transportStats.ts";
+import { type TransportStats } from "./transportStats.ts";
 
 export class TransportStatsBuilder {
     public static buildReport(
@@ -40,7 +40,7 @@ export class TransportStatsBuilder {
                     remoteCandidateType: remoteUsedCandidate.candidateType,
                     networkType: localUsedCandidate.networkType,
                     rtt: now.currentRoundTripTime ? now.currentRoundTripTime * 1000 : NaN,
-                } as TransportStats);
+                });
             }
         }
         return conferenceStatsTransport;

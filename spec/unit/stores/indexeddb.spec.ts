@@ -14,18 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/**
+ * @vitest-environment happy-dom
+ */
+
 import "fake-indexeddb/auto";
-import "jest-localstorage-mock";
 import { IDBFactory } from "fake-indexeddb";
 
-import { IndexedDBStore, IStateEventWithRoomId, MemoryStore, User, UserEvent } from "../../../src";
+import { IndexedDBStore, type IStateEventWithRoomId, MemoryStore, User, UserEvent } from "../../../src";
 import { emitPromise } from "../../test-utils/test-utils";
 import { LocalIndexedDBStoreBackend } from "../../../src/store/indexeddb-local-backend";
-import { defer } from "../../../src/utils";
+import { RemoteIndexedDBStoreBackend } from "../../../src/store/indexeddb-remote-backend";
 
 describe("IndexedDBStore", () => {
     afterEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     const roomId = "!room:id";
@@ -63,7 +66,7 @@ describe("IndexedDBStore", () => {
         // Simulate a broken IDB
         (store.backend as LocalIndexedDBStoreBackend)["db"]!.transaction = (): IDBTransaction => {
             const err = new Error(
-                "Failed to execute 'transaction' on 'IDBDatabase': " + "The database connection is closing.",
+                "Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.",
             );
             err.name = "InvalidStateError";
             throw err;
@@ -77,10 +80,66 @@ describe("IndexedDBStore", () => {
         expect(await store.getOutOfBandMembers(roomId)).toHaveLength(2);
     });
 
+    it("should degrade to local IDB backend if remote worker fails to start", async () => {
+        const store = new IndexedDBStore({
+            workerFactory: () => {
+                const w = {
+                    postMessage: vi.fn(),
+                } as unknown as Worker;
+                setTimeout(() => {
+                    w.onerror!({ error: "IndexedDB worker failed to connect" } as ErrorEvent);
+                }, 100);
+                return w;
+            },
+            indexedDB: indexedDB,
+            dbName: "database",
+            localStorage,
+        });
+
+        expect(store.backend).toBeInstanceOf(RemoteIndexedDBStoreBackend);
+        await store.startup();
+        expect(store.backend).toBeInstanceOf(LocalIndexedDBStoreBackend);
+    });
+
+    it("should handle failed queries", async () => {
+        const store = new IndexedDBStore({
+            indexedDB: indexedDB,
+            dbName: "database",
+            localStorage,
+        });
+        await store.startup();
+
+        // Simulate a failed query
+        let txn: IDBRequest;
+        (store.backend as LocalIndexedDBStoreBackend)["db"]!.transaction = (): IDBTransaction => {
+            return {
+                objectStore: (name: string) =>
+                    ({
+                        name,
+                        openCursor: (query: unknown) => {
+                            return (txn = {
+                                error: new DOMException("Expected error"),
+                            } as IDBRequest);
+                        },
+                    }) as IDBObjectStore,
+            } as IDBTransaction;
+        };
+
+        // Call backend directly as otherwise the error is masked.
+        const promise = store.backend.getClientOptions();
+        // The function uses a Promise.then(() => trick to delay execution
+        // so we need to wait before we can call the txn onerror handler.
+        process.nextTick(() => {
+            txn!.onerror!(new Event("we-ignore-this"));
+        });
+
+        await expect(() => promise).rejects.toThrow("selectQuery failed for client_options");
+    });
+
     it("Should load presence events on startup", async () => {
         // 1. Create idb database
         const indexedDB = new IDBFactory();
-        const setupDefer = defer<Event>();
+        const setupResolvers = Promise.withResolvers<Event>();
         const req = indexedDB.open("matrix-js-sdk:db3", 1);
         let db: IDBDatabase;
         req.onupgradeneeded = () => {
@@ -89,11 +148,11 @@ describe("IndexedDBStore", () => {
             db.createObjectStore("accountData", { keyPath: ["type"] });
             db.createObjectStore("sync", { keyPath: ["clobber"] });
         };
-        req.onsuccess = setupDefer.resolve;
-        await setupDefer.promise;
+        req.onsuccess = setupResolvers.resolve;
+        await setupResolvers.promise;
 
         // 2. Fill in user presence data
-        const writeDefer = defer<Event>();
+        const writeResolvers = Promise.withResolvers<Event>();
         const transaction = db!.transaction(["users"], "readwrite");
         const objectStore = transaction.objectStore("users");
         const request = objectStore.put({
@@ -106,8 +165,8 @@ describe("IndexedDBStore", () => {
                 type: "m.presence",
             },
         });
-        request.onsuccess = writeDefer.resolve;
-        await writeDefer.promise;
+        request.onsuccess = writeResolvers.resolve;
+        await writeResolvers.promise;
 
         // 3. Close database
         req.result.close();
@@ -134,8 +193,8 @@ describe("IndexedDBStore", () => {
     });
 
     it("should use MemoryStore methods for pending events if no localStorage", async () => {
-        jest.spyOn(MemoryStore.prototype, "setPendingEvents");
-        jest.spyOn(MemoryStore.prototype, "getPendingEvents");
+        vi.spyOn(MemoryStore.prototype, "setPendingEvents");
+        vi.spyOn(MemoryStore.prototype, "getPendingEvents");
 
         const store = new IndexedDBStore({
             indexedDB: indexedDB,
@@ -151,8 +210,8 @@ describe("IndexedDBStore", () => {
     });
 
     it("should persist pending events to localStorage if available", async () => {
-        jest.spyOn(MemoryStore.prototype, "setPendingEvents");
-        jest.spyOn(MemoryStore.prototype, "getPendingEvents");
+        vi.spyOn(MemoryStore.prototype, "setPendingEvents");
+        vi.spyOn(MemoryStore.prototype, "getPendingEvents");
 
         const store = new IndexedDBStore({
             indexedDB: indexedDB,
@@ -201,7 +260,7 @@ describe("IndexedDBStore", () => {
     });
 
     it("should resolve isNewlyCreated to false if database existed already but needs upgrade", async () => {
-        const deferred = defer<Event>();
+        const requestSuccessResolvers = Promise.withResolvers<Event>();
         // seed db3 to Version 1 so it forces a migration
         const req = indexedDB.open("matrix-js-sdk:db3", 1);
         req.onupgradeneeded = () => {
@@ -210,8 +269,8 @@ describe("IndexedDBStore", () => {
             db.createObjectStore("accountData", { keyPath: ["type"] });
             db.createObjectStore("sync", { keyPath: ["clobber"] });
         };
-        req.onsuccess = deferred.resolve;
-        await deferred.promise;
+        req.onsuccess = requestSuccessResolvers.resolve;
+        await requestSuccessResolvers.promise;
         req.result.close();
 
         const store = new IndexedDBStore({
@@ -232,20 +291,20 @@ describe("IndexedDBStore", () => {
         });
         await store.startup();
 
-        const deferred = defer<void>();
-        store.on("closed", deferred.resolve);
+        const storeClosedResolvers = Promise.withResolvers<void>();
+        store.on("closed", storeClosedResolvers.resolve);
 
         // @ts-ignore - private field access
         (store.backend as LocalIndexedDBStoreBackend).db!.onclose!({} as Event);
-        await deferred.promise;
+        await expect(storeClosedResolvers.promise).resolves.toBeUndefined();
     });
 
     it("should use remote backend if workerFactory passed", async () => {
-        const deferred = defer<void>();
+        const workerPostMessageResolvers = Promise.withResolvers<void>();
         class MockWorker {
             postMessage(data: any) {
                 if (data.command === "setupWorker") {
-                    deferred.resolve();
+                    workerPostMessageResolvers.resolve();
                 }
             }
         }
@@ -257,7 +316,7 @@ describe("IndexedDBStore", () => {
             workerFactory: () => new MockWorker() as Worker,
         });
         store.startup();
-        await deferred.promise;
+        await expect(workerPostMessageResolvers.promise).resolves.toBeUndefined();
     });
 
     it("remote worker should pass closed event", async () => {
@@ -273,10 +332,10 @@ describe("IndexedDBStore", () => {
         });
         store.startup();
 
-        const deferred = defer<void>();
-        store.on("closed", deferred.resolve);
+        const storeClosedResolvers = Promise.withResolvers<void>();
+        store.on("closed", storeClosedResolvers.resolve);
         (worker as any).onmessage({ data: { command: "closed" } });
-        await deferred.promise;
+        await expect(storeClosedResolvers.promise).resolves.toBeUndefined();
     });
 
     it("remote worker should pass command failures", async () => {
@@ -313,7 +372,7 @@ describe("IndexedDBStore", () => {
     });
 
     it("remote worker should terminate upon destroy call", async () => {
-        const terminate = jest.fn();
+        const terminate = vi.fn();
         const worker = new (class MockWorker {
             private onmessage!: (data: any) => void;
             postMessage(data: any) {

@@ -14,23 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MBeaconEventContent, MBeaconInfoContent, MBeaconInfoEventContent } from "./@types/beacon.ts";
+import { type MBeaconEventContent, type MBeaconInfoContent, type MBeaconInfoEventContent } from "./@types/beacon.ts";
 import { MsgType } from "./@types/event.ts";
-import { M_TEXT, REFERENCE_RELATION } from "./@types/extensible_events.ts";
+import { type IMessageRendering, M_TEXT, REFERENCE_RELATION } from "./@types/extensible_events.ts";
 import { isProvided } from "./extensible_events_v1/utilities.ts";
 import {
     M_ASSET,
     LocationAssetType,
     M_LOCATION,
     M_TIMESTAMP,
-    LocationEventWireContent,
-    MLocationEventContent,
-    MLocationContent,
-    MAssetContent,
-    LegacyLocationEventContent,
+    type LocationEventWireContent,
+    type MLocationEventContent,
+    type MLocationContent,
+    type MAssetContent,
+    type LegacyLocationEventContent,
 } from "./@types/location.ts";
-import { MRoomTopicEventContent, MTopicContent, M_TOPIC } from "./@types/topic.ts";
-import { RoomMessageEventContent } from "./@types/events.ts";
+import { type MRoomTopicEventContent, type MTopicContent, M_TOPIC, type MTopicEvent } from "./@types/topic.ts";
+import { type RoomMessageEventContent } from "./@types/events.ts";
 
 /**
  * Generates the content for a HTML Message event
@@ -185,27 +185,37 @@ export const parseLocationEvent = (wireEventContent: LocationEventWireContent): 
 /**
  * Topic event helpers
  */
-export type MakeTopicContent = (topic: string, htmlTopic?: string) => MRoomTopicEventContent;
+export type MakeTopicContent = (topic: string | null | undefined, htmlTopic?: string) => MRoomTopicEventContent;
 
 export const makeTopicContent: MakeTopicContent = (topic, htmlTopic) => {
-    const renderings = [{ body: topic, mimetype: "text/plain" }];
+    const renderings = [];
+    // Put HTML first because clients will render the first type in
+    // the array that they understand
     if (isProvided(htmlTopic)) {
-        renderings.push({ body: htmlTopic!, mimetype: "text/html" });
+        renderings.push({ body: htmlTopic, mimetype: "text/html" });
     }
-    return { topic, [M_TOPIC.name]: renderings };
+    if (isProvided(topic)) {
+        renderings.push({ body: topic, mimetype: "text/plain" });
+    }
+    return { topic, [M_TOPIC.name]: { "m.text": renderings } };
 };
 
 export type TopicState = {
-    text: string;
+    text?: string;
     html?: string;
 };
 
 export const parseTopicContent = (content: MRoomTopicEventContent): TopicState => {
-    const mtopic = M_TOPIC.findIn<MTopicContent>(content);
+    const mtopicParent = M_TOPIC.findIn<MTopicContent | IMessageRendering[]>(content as MTopicEvent);
+    const mtopic = Array.isArray(mtopicParent) ? mtopicParent : mtopicParent?.["m.text"];
+    // TODO remove support for the old malformed m.topic arrays after a few releases (only allow array in m.text)
+    //      https://github.com/matrix-org/matrix-js-sdk/pull/4984#pullrequestreview-3174251065
+    //const mtopic = M_TOPIC.findIn<MTopicContent>(content)?.["m.text"];
     if (!Array.isArray(mtopic)) {
-        return { text: content.topic };
+        return { text: content.topic ?? undefined };
     }
-    const text = mtopic?.find((r) => !isProvided(r.mimetype) || r.mimetype === "text/plain")?.body ?? content.topic;
+    const text =
+        mtopic?.find((r) => !isProvided(r.mimetype) || r.mimetype === "text/plain")?.body ?? content.topic ?? undefined;
     const html = mtopic?.find((r) => r.mimetype === "text/html")?.body;
     return { text, html };
 };

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MsgType } from "../@types/event.ts";
+import { type MsgType } from "../@types/event.ts";
 
 /**
  * Information on encrypted media attachments.
@@ -33,7 +33,7 @@ export interface EncryptedFile {
      */
     key: {
         alg: string;
-        key_ops: string[]; // eslint-disable-line camelcase
+        key_ops: string[];
         kty: string;
         k: string;
         ext: boolean;

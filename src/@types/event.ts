@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Matrix.org Foundation C.I.C.
+Copyright 2020-2026 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,50 +14,59 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import { type EitherAnd } from "matrix-events-sdk";
+
 import { NamespacedValue, UnstableValue } from "../NamespacedValue.ts";
 import {
-    PolicyRuleEventContent,
-    RoomAvatarEventContent,
-    RoomCanonicalAliasEventContent,
-    RoomCreateEventContent,
-    RoomEncryptionEventContent,
-    RoomGuestAccessEventContent,
-    RoomHistoryVisibilityEventContent,
-    RoomJoinRulesEventContent,
-    RoomMemberEventContent,
-    RoomNameEventContent,
-    RoomPinnedEventsEventContent,
-    RoomPowerLevelsEventContent,
-    RoomServerAclEventContent,
-    RoomThirdPartyInviteEventContent,
-    RoomTombstoneEventContent,
-    RoomTopicEventContent,
-    SpaceChildEventContent,
-    SpaceParentEventContent,
+    type PolicyRuleEventContent,
+    type RoomAvatarEventContent,
+    type RoomCanonicalAliasEventContent,
+    type RoomCreateEventContent,
+    type RoomEncryptionEventContent,
+    type RoomGuestAccessEventContent,
+    type RoomHistoryVisibilityEventContent,
+    type RoomJoinRulesEventContent,
+    type RoomMemberEventContent,
+    type RoomNameEventContent,
+    type RoomPinnedEventsEventContent,
+    type RoomPolicyContent,
+    type RoomPowerLevelsEventContent,
+    type RoomServerAclEventContent,
+    type RoomThirdPartyInviteEventContent,
+    type RoomTombstoneEventContent,
+    type RoomTopicEventContent,
+    type SpaceChildEventContent,
+    type SpaceParentEventContent,
 } from "./state_events.ts";
-import { IGroupCallRoomMemberState, IGroupCallRoomState } from "../webrtc/groupCall.ts";
-import { MSC3089EventContent } from "../models/MSC3089Branch.ts";
-import { M_BEACON, M_BEACON_INFO, MBeaconEventContent, MBeaconInfoEventContent } from "./beacon.ts";
-import { XOR } from "./common.ts";
-import { ReactionEventContent, RoomMessageEventContent, StickerEventContent } from "./events.ts";
+import { type IGroupCallRoomMemberState, type IGroupCallRoomState } from "../webrtc/groupCall.ts";
+import { type MSC3089EventContent } from "../models/MSC3089Branch.ts";
+import { type M_BEACON, type M_BEACON_INFO, type MBeaconEventContent, type MBeaconInfoEventContent } from "./beacon.ts";
+import { type EmptyObject } from "./common.ts";
+import { type ReactionEventContent, type RoomMessageEventContent, type StickerEventContent } from "./events.ts";
 import {
-    MCallAnswer,
-    MCallBase,
-    MCallCandidates,
-    MCallHangupReject,
-    MCallInviteNegotiate,
-    MCallReplacesEvent,
-    MCallSelectAnswer,
-    SDPStreamMetadata,
-    SDPStreamMetadataKey,
+    type MCallAnswer,
+    type MCallBase,
+    type MCallCandidates,
+    type MCallHangupReject,
+    type MCallInviteNegotiate,
+    type MCallReplacesEvent,
+    type MCallSelectAnswer,
+    type SDPStreamMetadata,
 } from "../webrtc/callEventTypes.ts";
-import { EncryptionKeysEventContent, ICallNotifyContent } from "../matrixrtc/types.ts";
-import { M_POLL_END, M_POLL_START, PollEndEventContent, PollStartEventContent } from "./polls.ts";
-import { SessionMembershipData } from "../matrixrtc/CallMembership.ts";
-import { LocalNotificationSettings } from "./local_notifications.ts";
-import { IPushRules } from "./PushRules.ts";
-import { SecretInfo, SecretStorageKeyDescription } from "../secret-storage.ts";
-import { POLICIES_ACCOUNT_EVENT_TYPE } from "../models/invites-ignorer-types.ts";
+import {
+    type IRTCNotificationContent,
+    type IRTCDeclineContent,
+    type EncryptionKeysEventContent,
+    type ICallNotifyContent,
+    type RtcSlotEventContent,
+} from "../matrixrtc/types.ts";
+import { type M_POLL_END, type M_POLL_START, type PollEndEventContent, type PollStartEventContent } from "./polls.ts";
+import { type RtcMembershipData, type SessionMembershipData } from "../matrixrtc/membershipData/index.ts";
+import { type LocalNotificationSettings } from "./local_notifications.ts";
+import { type IPushRules } from "./PushRules.ts";
+import { type SecretInfo, type SecretStorageKeyDescription } from "../secret-storage.ts";
+import { type POLICIES_ACCOUNT_EVENT_TYPE } from "../models/invites-ignorer-types.ts";
+import type { ROOM_RETENTION_TYPE, RoomRetentionContent } from "./retention.ts";
 
 export enum EventType {
     // Room state events
@@ -127,24 +136,39 @@ export enum EventType {
     FullyRead = "m.fully_read",
     Tag = "m.tag",
     SpaceOrder = "org.matrix.msc3230.space_order", // MSC3230
+    MarkedUnread = "m.marked_unread",
 
     // User account_data events
     PushRules = "m.push_rules",
     Direct = "m.direct",
     IgnoredUserList = "m.ignored_user_list",
+    InvitePermissionConfig = "m.invite_permission_config", // MSC4380
 
     // to_device events
     RoomKey = "m.room_key",
     RoomKeyRequest = "m.room_key_request",
     ForwardedRoomKey = "m.forwarded_room_key",
     Dummy = "m.dummy",
+    SecretRequest = "m.secret.request",
+    SecretSend = "m.secret.send",
 
     // Group call events
     GroupCallPrefix = "org.matrix.msc3401.call",
     GroupCallMemberPrefix = "org.matrix.msc3401.call.member",
 
     // MatrixRTC events
+    RTCSlot = "org.matrix.msc4143.rtc.slot",
+    RTCMembership = "org.matrix.msc4143.rtc.member",
     CallNotify = "org.matrix.msc4075.call.notify",
+    RTCNotification = "org.matrix.msc4075.rtc.notification",
+    RTCDecline = "org.matrix.msc4310.rtc.decline",
+
+    // Policy servers
+    RoomPolicy = "org.matrix.msc4284.policy",
+
+    // Retention
+    RetentionPolicy = "m.room.retention",
+    RetentionPolicyUnstable = "org.matrix.msc1763.retention",
 }
 
 export enum RelationType {
@@ -320,12 +344,24 @@ export interface TimelineEvents {
     [EventType.CallCandidates]: MCallCandidates;
     [EventType.CallHangup]: MCallHangupReject;
     [EventType.CallReject]: MCallHangupReject;
-    [EventType.CallSDPStreamMetadataChangedPrefix]: MCallBase & { [SDPStreamMetadataKey]: SDPStreamMetadata };
+    [EventType.CallSDPStreamMetadataChangedPrefix]: MCallBase &
+        EitherAnd<
+            { sdp_stream_metadata: SDPStreamMetadata },
+            { "org.matrix.msc3077.sdp_stream_metadata": SDPStreamMetadata }
+        >;
+    [EventType.CallSDPStreamMetadataChanged]: MCallBase &
+        EitherAnd<
+            { sdp_stream_metadata: SDPStreamMetadata },
+            { "org.matrix.msc3077.sdp_stream_metadata": SDPStreamMetadata }
+        >;
     [EventType.CallEncryptionKeysPrefix]: EncryptionKeysEventContent;
     [EventType.CallNotify]: ICallNotifyContent;
+    [EventType.RTCNotification]: IRTCNotificationContent;
+    [EventType.RTCDecline]: IRTCDeclineContent;
     [M_BEACON.name]: MBeaconEventContent;
     [M_POLL_START.name]: PollStartEventContent;
     [M_POLL_END.name]: PollEndEventContent;
+    [EventType.RTCMembership]: RtcMembershipData | { msc4354_sticky_key: string }; // An object containing just the sticky key is empty.
 }
 
 /**
@@ -337,7 +373,7 @@ export interface StateEvents {
     [EventType.RoomJoinRules]: RoomJoinRulesEventContent;
     [EventType.RoomMember]: RoomMemberEventContent;
     // XXX: Spec says this event has 3 required fields but kicking such an invitation requires sending `{}`
-    [EventType.RoomThirdPartyInvite]: XOR<RoomThirdPartyInviteEventContent, {}>;
+    [EventType.RoomThirdPartyInvite]: RoomThirdPartyInviteEventContent | EmptyObject;
     [EventType.RoomPowerLevels]: RoomPowerLevelsEventContent;
     [EventType.RoomName]: RoomNameEventContent;
     [EventType.RoomTopic]: RoomTopicEventContent;
@@ -351,19 +387,37 @@ export interface StateEvents {
     [EventType.SpaceChild]: SpaceChildEventContent;
     [EventType.SpaceParent]: SpaceParentEventContent;
 
-    [EventType.PolicyRuleUser]: XOR<PolicyRuleEventContent, {}>;
-    [EventType.PolicyRuleRoom]: XOR<PolicyRuleEventContent, {}>;
-    [EventType.PolicyRuleServer]: XOR<PolicyRuleEventContent, {}>;
+    [EventType.PolicyRuleUser]: PolicyRuleEventContent | EmptyObject;
+    [EventType.PolicyRuleRoom]: PolicyRuleEventContent | EmptyObject;
+    [EventType.PolicyRuleServer]: PolicyRuleEventContent | EmptyObject;
+
+    // MSC4284: Policy servers
+    [EventType.RoomPolicy]: RoomPolicyContent | EmptyObject;
 
     // MSC3401
     [EventType.GroupCallPrefix]: IGroupCallRoomState;
-    [EventType.GroupCallMemberPrefix]: XOR<IGroupCallRoomMemberState, XOR<SessionMembershipData, {}>>;
-
+    [EventType.GroupCallMemberPrefix]: IGroupCallRoomMemberState | SessionMembershipData | EmptyObject;
+    [EventType.RTCMembership]: RtcMembershipData | EmptyObject;
+    [EventType.RTCSlot]: RtcSlotEventContent | EmptyObject;
     // MSC3089
     [UNSTABLE_MSC3089_BRANCH.name]: MSC3089EventContent;
 
     // MSC3672
     [M_BEACON_INFO.name]: MBeaconInfoEventContent;
+
+    // MSC1763
+    [ROOM_RETENTION_TYPE.name]: RoomRetentionContent | EmptyObject;
+    [ROOM_RETENTION_TYPE.altName]: RoomRetentionContent | EmptyObject;
+}
+
+/**
+ * Mapped type from event type to content type for all specified room-specific account_data events.
+ */
+export interface RoomAccountDataEvents extends SecretStorageAccountDataEvents {
+    [EventType.FullyRead]: { event_id: string };
+    [EventType.Tag]: { tags: { [name: string]: { order?: number } } };
+    [EventType.SpaceOrder]: { order: string };
+    [EventType.MarkedUnread]: { unread: boolean };
 }
 
 /**
@@ -372,8 +426,14 @@ export interface StateEvents {
 export interface AccountDataEvents extends SecretStorageAccountDataEvents {
     [EventType.PushRules]: IPushRules;
     [EventType.Direct]: { [userId: string]: string[] };
-    [EventType.IgnoredUserList]: { [userId: string]: {} };
+    [EventType.IgnoredUserList]: { ignored_users: { [userId: string]: EmptyObject } };
     "m.secret_storage.default_key": { key: string };
+
+    // MSC4287: Sharing key backup preference between clients - used to mark that the user opted out of key storage
+    "m.key_backup": { enabled: boolean };
+    // MSC4287 unstable prefix (note the boolean property has the opposite sense)
+    "m.org.matrix.custom.backup_disabled": { disabled: boolean };
+
     "m.identity_server": { base_url: string | null };
     [key: `${typeof LOCAL_NOTIFICATION_SETTINGS_PREFIX.name}.${string}`]: LocalNotificationSettings;
     [key: `m.secret_storage.key.${string}`]: SecretStorageKeyDescription;
@@ -381,7 +441,23 @@ export interface AccountDataEvents extends SecretStorageAccountDataEvents {
     // Invites-ignorer events
     [POLICIES_ACCOUNT_EVENT_TYPE.name]: { [key: string]: any };
     [POLICIES_ACCOUNT_EVENT_TYPE.altName]: { [key: string]: any };
+
+    [EventType.InvitePermissionConfig]: { default_action?: string };
+
+    // List of recently used reaction emojis
+    // https://spec.matrix.org/v1.18/client-server-api/#mrecent_emoji
+    "m.recent_emoji": {
+        recent_emoji: Array<{
+            emoji: string;
+            total: number;
+        }>;
+    };
 }
+
+/**
+ * Subset of AccountDataEvents, excluding events specified in https://spec.matrix.org/v1.17/client-server-api/#server-behaviour-12
+ */
+export type WritableAccountDataEvents = Exclude<AccountDataEvents, "m.fully_read" | "m.push_rules">;
 
 /**
  * Mapped type from event type to content type for all specified global events encrypted by secret storage.

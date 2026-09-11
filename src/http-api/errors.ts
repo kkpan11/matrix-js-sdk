@@ -14,10 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IMatrixApiError as IWidgetMatrixError } from "matrix-widget-api";
+import { type IMatrixApiError as IWidgetMatrixError } from "matrix-widget-api";
 
-import { IUsageLimit } from "../@types/partials.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type IUsageLimit } from "../@types/partials.ts";
+import { type MatrixEvent } from "../models/event.ts";
+import { NamespacedValue } from "../NamespacedValue.ts";
+import { hasRequiredStringProperty, isRecord } from "../@types/type-guards.ts";
 
 interface IErrorJson extends Partial<IUsageLimit> {
     [key: string]: any; // extensible
@@ -79,9 +81,26 @@ export class HTTPError extends Error {
     }
 }
 
+/**
+ * Check if the given (JSON-parsed) response body looks like a Matrix error
+ * response as specified in https://spec.matrix.org/v1.19/client-server-api/#standard-error-response
+ *
+ * @param response - the parsed response body to check
+ * @returns whether the response is a valid {@link MatrixError}
+ */
+export function isMatrixErrorResponse(response: unknown): response is MatrixError {
+    return (
+        isRecord(response) &&
+        hasRequiredStringProperty(response, "error") &&
+        hasRequiredStringProperty(response, "errcode")
+    );
+}
+
 export class MatrixError extends HTTPError {
     // The Matrix 'errcode' value, e.g. "M_FORBIDDEN".
     public readonly errcode?: string;
+    // The Matrix 'error' value.
+    public readonly error?: string;
     // The raw Matrix error JSON used to construct this object.
     public data: IErrorJson;
 
@@ -108,6 +127,7 @@ export class MatrixError extends HTTPError {
         }
         super(`MatrixError: ${message}`, httpStatus, httpHeaders);
         this.errcode = errorJson.errcode;
+        this.error = errorJson.error;
         this.name = errorJson.errcode || "Unknown error code";
         this.data = errorJson;
     }
@@ -195,5 +215,63 @@ export class ConnectionError extends Error {
 
     public get name(): string {
         return "ConnectionError";
+    }
+}
+
+/**
+ * Construct a TokenRefreshError. This indicates that a request failed due to the token being expired,
+ * and attempting to refresh said token also failed but in a way which was not indicative of token invalidation.
+ * Assumed to be a temporary failure.
+ */
+export class TokenRefreshError extends Error {
+    public constructor(cause?: Error) {
+        super(cause?.message ?? "");
+    }
+
+    public get name(): string {
+        return "TokenRefreshError";
+    }
+}
+
+/**
+ * Construct a TokenRefreshError. This indicates that a request failed due to the token being expired,
+ * and attempting to refresh said token failed in a way indicative of token invalidation.
+ */
+export class TokenRefreshLogoutError extends Error {
+    public constructor(cause?: Error) {
+        super(cause?.message ?? "");
+    }
+
+    public get name(): string {
+        return "TokenRefreshLogoutError";
+    }
+}
+
+export const MatrixSafetyErrorCode = new NamespacedValue(null, "ORG.MATRIX.MSC4387_SAFETY");
+
+/***
+ * This error is thrown when the homeserver refuses to handle an action due to a
+ * safety concern.
+ * @see https://github.com/matrix-org/matrix-spec-proposals/pull/4387
+ */
+export class MatrixSafetyError extends MatrixError {
+    /**
+     * The kinds of harms detected by the server.
+     * @see https://github.com/matrix-org/matrix-spec-proposals/pull/4387 for a list of spec defined harms.
+     */
+    public readonly harms: Set<string>;
+    /**
+     * The date at which a request can be reattempted.
+     */
+    public readonly expiry?: Date;
+    public constructor(...props: ConstructorParameters<typeof MatrixError>) {
+        super(...props);
+        const body = props[0];
+
+        this.harms = new Set(body && "harms" in body && Array.isArray(body.harms) ? body.harms : []);
+        this.message = `${super.message} (${[...this.harms].join(", ")})`;
+        if (body && "expiry" in body && typeof body.expiry === "number") {
+            this.expiry = new Date(body.expiry);
+        }
     }
 }

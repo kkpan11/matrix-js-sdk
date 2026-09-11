@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MatrixClient, MatrixEvent, MatrixEventEvent, MatrixScheduler, Room } from "../../src";
+import { MatrixClient, MatrixEvent, MatrixEventEvent, type MatrixScheduler, Room } from "../../src";
 import { eventMapperFor } from "../../src/event-mapper";
-import { IStore } from "../../src/store";
+import { type IStore } from "../../src/store";
 
 describe("eventMapperFor", function () {
     let rooms: Room[] = [];
@@ -37,7 +37,7 @@ describe("eventMapperFor", function () {
                 setUserCreator(_) {},
             } as IStore,
             scheduler: {
-                setProcessFunction: jest.fn(),
+                setProcessFunction: vi.fn(),
             } as unknown as MatrixScheduler,
             userId: userId,
         });
@@ -133,7 +133,7 @@ describe("eventMapperFor", function () {
             event_id: eventId,
         };
 
-        const decryptEventIfNeededSpy = jest.spyOn(client, "decryptEventIfNeeded");
+        const decryptEventIfNeededSpy = vi.spyOn(client, "decryptEventIfNeeded");
         decryptEventIfNeededSpy.mockResolvedValue(); // stub it out
 
         const mapper = eventMapperFor(client, {
@@ -161,7 +161,7 @@ describe("eventMapperFor", function () {
             event_id: eventId,
         };
 
-        const evListener = jest.fn();
+        const evListener = vi.fn();
         client.on(MatrixEventEvent.Replaced, evListener);
 
         const noReEmitMapper = eventMapperFor(client, {

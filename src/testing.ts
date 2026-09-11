@@ -22,11 +22,12 @@ limitations under the License.
  * @packageDocumentation
  */
 
-import { IContent, IEvent, IUnsigned, MatrixEvent } from "./models/event.ts";
-import { RoomMember } from "./models/room-member.ts";
+import { type IContent, type IEvent, type IUnsigned, MatrixEvent } from "./models/event.ts";
+import { type RoomMember } from "./models/room-member.ts";
 import { EventType } from "./@types/event.ts";
-import { DecryptionFailureCode } from "./crypto-api/index.ts";
-import { DecryptionError, EventDecryptionResult } from "./common-crypto/CryptoBackend.ts";
+import { type DecryptionFailureCode } from "./crypto-api/index.ts";
+import { DecryptionError, type EventDecryptionResult } from "./common-crypto/CryptoBackend.ts";
+import { OAuthGrantType, type ValidatedAuthMetadata } from "./oauth/index.ts";
 
 /**
  * Create a {@link MatrixEvent}.
@@ -178,9 +179,7 @@ export async function decryptExistingEvent(
             type: opts.plainType,
             content: opts.plainContent,
         },
-        forwardingCurve25519KeyChain: [],
         senderCurve25519Key: "",
-        untrusted: false,
     };
 
     const mockCrypto = {
@@ -188,3 +187,26 @@ export async function decryptExistingEvent(
     } as Parameters<MatrixEvent["attemptDecryption"]>[0];
     await mxEvent.attemptDecryption(mockCrypto);
 }
+
+/**
+ * Makes a valid OidcClientConfig with minimum valid values
+ * @param issuer used as the base for all other urls
+ * @param additionalGrantTypes to add to the default grant types
+ * @returns OidcClientConfig
+ * @experimental
+ */
+export const makeDelegatedAuthMetadata = (
+    issuer = "https://auth.org/",
+    additionalGrantTypes: string[] = [],
+): ValidatedAuthMetadata => ({
+    issuer,
+    revocation_endpoint: issuer + "revoke",
+    token_endpoint: issuer + "token",
+    authorization_endpoint: issuer + "auth",
+    registration_endpoint: issuer + "registration",
+    device_authorization_endpoint: issuer + "device",
+    response_types_supported: ["code"],
+    grant_types_supported: [OAuthGrantType.AuthorizationCode, OAuthGrantType.RefreshToken, ...additionalGrantTypes],
+    code_challenge_methods_supported: ["S256"],
+    response_modes_supported: ["query", "fragment"],
+});

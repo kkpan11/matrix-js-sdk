@@ -14,26 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IContent, IEvent } from "../models/event.ts";
-import { Preset, Visibility } from "./partials.ts";
-import { IEventWithRoomId, SearchKey } from "./search.ts";
-import { IRoomEventFilter } from "../filter.ts";
-import { Direction } from "../models/event-timeline.ts";
-import { PushRuleAction } from "./PushRules.ts";
-import { IRoomEvent } from "../sync-accumulator.ts";
-import { EventType, RelationType, RoomType } from "./event.ts";
-
-// allow camelcase as these are things that go onto the wire
-/* eslint-disable camelcase */
+import { type IContent, type IEvent } from "../models/event.ts";
+import { type Preset, type Visibility } from "./partials.ts";
+import { type IEventWithRoomId, type SearchKey } from "./search.ts";
+import { type IRoomEventFilter } from "../filter.ts";
+import { type Direction } from "../models/event-timeline.ts";
+import { type PushRuleAction } from "./PushRules.ts";
+import { type MatrixError } from "../matrix.ts";
+import { type IRoomEvent } from "../sync-accumulator.ts";
+import { type EventType, type RelationType, type RoomType } from "./event.ts";
 
 export interface IJoinRoomOpts {
-    /**
-     * True to do a room initial sync on the resulting
-     * room. If false, the <strong>returned Room object will have no current state.
-     * </strong> Default: true.
-     */
-    syncRoom?: boolean;
-
     /**
      * If the caller has a keypair 3pid invite, the signing URL is passed in this parameter.
      */
@@ -41,8 +32,33 @@ export interface IJoinRoomOpts {
 
     /**
      * The server names to try and join through in addition to those that are automatically chosen.
+     * Only the first 3 are actually used in the request, to avoid HTTP 414 Request-URI Too Long responses.
      */
     viaServers?: string[];
+
+    /**
+     * Previously, configured whether to accept encrypted history shared by the inviter. This is now always enabled,
+     * and the setting is only retained to avoid a breaking change to the API. It has no effect.
+     *
+     * @deprecated
+     */
+    acceptSharedHistory?: boolean;
+}
+
+/** Options object for {@link MatrixClient.invite}. */
+export interface InviteOpts {
+    /**
+     * The reason for the invite.
+     */
+    reason?: string;
+
+    /**
+     * Previously, configured whether to send encrypted history if the visibility settings allow it.
+     * This is now always enabled, and the setting is only retained to avoid a breaking change to the API. It has no effect.
+     *
+     * @deprecated
+     */
+    shareEncryptedHistory?: boolean;
 }
 
 export interface KnockRoomOpts {
@@ -53,6 +69,7 @@ export interface KnockRoomOpts {
 
     /**
      * The server names to try and knock through in addition to those that are automatically chosen.
+     * Only the first 3 are actually used in the request, to avoid HTTP 414 Request-URI Too Long responses.
      */
     viaServers?: string | string[];
 }
@@ -76,19 +93,20 @@ export interface ISendEventResponse {
     event_id: string;
 }
 
-export type TimeoutDelay = {
-    delay: number;
-};
+export type SendDelayedEventRequestOpts = { parent_delay_id: string } | { delay: number; parent_delay_id?: string };
 
-export type ParentDelayId = {
-    parent_delay_id: string;
-};
-
-export type SendTimeoutDelayedEventRequestOpts = TimeoutDelay & Partial<ParentDelayId>;
-export type SendActionDelayedEventRequestOpts = ParentDelayId;
-
-export type SendDelayedEventRequestOpts = SendTimeoutDelayedEventRequestOpts | SendActionDelayedEventRequestOpts;
-
+export function isSendDelayedEventRequestOpts(opts: object): opts is SendDelayedEventRequestOpts {
+    if ("parent_delay_id" in opts && typeof opts.parent_delay_id !== "string") {
+        // Invalid type, reject
+        return false;
+    }
+    if ("delay" in opts && typeof opts.delay !== "number") {
+        // Invalid type, reject.
+        return true;
+    }
+    // At least one of these fields must be specified.
+    return "delay" in opts || "parent_delay_id" in opts;
+}
 export type SendDelayedEventResponse = {
     delay_id: string;
 };
@@ -115,12 +133,22 @@ type DelayedPartialStateEvent = DelayedPartialTimelineEvent & {
 
 type DelayedPartialEvent = DelayedPartialTimelineEvent | DelayedPartialStateEvent;
 
+export type DelayedEventInfoItem = DelayedPartialEvent &
+    SendDelayedEventResponse &
+    SendDelayedEventRequestOpts & {
+        running_since: number;
+    };
+
 export type DelayedEventInfo = {
-    delayed_events: (DelayedPartialEvent &
-        SendDelayedEventResponse &
-        SendDelayedEventRequestOpts & {
-            running_since: number;
-        })[];
+    scheduled?: DelayedEventInfoItem[];
+    finalised?: {
+        delayed_event: DelayedEventInfoItem;
+        outcome: "send" | "cancel";
+        reason: "error" | "action" | "delay";
+        error?: MatrixError["data"];
+        event_id?: string;
+        origin_server_ts?: number;
+    }[];
     next_batch?: string;
 };
 
@@ -266,12 +294,12 @@ export interface IRelationsResponse {
 }
 
 export interface IContextResponse {
-    end: string;
-    start: string;
-    state: IEventWithRoomId[];
-    events_before: IEventWithRoomId[];
-    events_after: IEventWithRoomId[];
-    event: IEventWithRoomId;
+    end?: string;
+    start?: string;
+    state?: IEventWithRoomId[];
+    events_before?: IEventWithRoomId[];
+    events_after?: IEventWithRoomId[];
+    event?: IEventWithRoomId;
 }
 
 export interface IEventsResponse {
@@ -310,5 +338,3 @@ export interface IStatusResponse extends IPresenceOpts {
     currently_active?: boolean;
     last_active_ago?: number;
 }
-
-/* eslint-enable camelcase */

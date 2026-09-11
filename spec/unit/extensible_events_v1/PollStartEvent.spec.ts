@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { M_TEXT, IPartialEvent } from "../../../src/@types/extensible_events";
+import { M_TEXT, type IPartialEvent } from "../../../src/@types/extensible_events";
 import {
     M_POLL_START,
     M_POLL_KIND_DISCLOSED,
-    PollAnswer,
-    PollStartEventContent,
+    type PollAnswer,
+    type PollStartEventContent,
     M_POLL_KIND_UNDISCLOSED,
 } from "../../../src/@types/polls";
 import { PollStartEvent, PollAnswerSubevent } from "../../../src/extensible_events_v1/PollStartEvent";
@@ -174,7 +174,7 @@ describe("PollStartEvent", () => {
                     kind: M_POLL_KIND_DISCLOSED.name,
                     max_selections: 2,
                     answers: [],
-                } as any, // force invalid type
+                },
             },
         };
         expect(() => new PollStartEvent(input)).toThrow(new InvalidEventError("No answers available"));

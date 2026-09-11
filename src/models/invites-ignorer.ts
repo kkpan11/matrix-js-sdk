@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MatrixClient } from "../client.ts";
-import { IContent, MatrixEvent } from "./event.ts";
+import { type MatrixClient } from "../client.ts";
+import { type IContent, type MatrixEvent } from "./event.ts";
 import { EventTimeline } from "./event-timeline.ts";
 import { Preset } from "../@types/partials.ts";
 import { globToRegexp } from "../utils.ts";
-import { Room } from "./room.ts";
-import { EventType, StateEvents } from "../@types/event.ts";
+import { type Room } from "./room.ts";
+import { EventType, type StateEvents } from "../@types/event.ts";
 import {
     IGNORE_INVITES_ACCOUNT_EVENT_KEY,
     POLICIES_ACCOUNT_EVENT_TYPE,
@@ -252,7 +252,7 @@ export class IgnoredInvites {
             // `sources` could contain non-string / invalid room ids
             .filter((roomId) => typeof roomId === "string")
             .map((roomId) => this.client.getRoom(roomId))
-            .filter((room) => !!room) as Room[];
+            .filter((room) => !!room);
         if (sourceRooms.length != sources.length) {
             hasChanges = true;
         }

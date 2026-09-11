@@ -17,7 +17,7 @@ limitations under the License.
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 
 import { Device, DeviceVerification } from "../models/device.ts";
-import { DeviceKeys } from "../client.ts";
+import { type DeviceKeys } from "../client.ts";
 
 /**
  * Convert a {@link RustSdkCryptoJs.Device} to a {@link Device}
@@ -111,6 +111,7 @@ export function downloadDeviceToJsDevice(device: QueryDevice): Device {
 
     const signatures = new Map<string, Map<string, string>>();
     if (device.signatures) {
+        // oxlint-disable-next-line guard-for-in
         for (const userId in device.signatures) {
             signatures.set(userId, new Map(Object.entries(device.signatures[userId])));
         }

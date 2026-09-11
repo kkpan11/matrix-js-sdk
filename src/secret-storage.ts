@@ -20,15 +20,15 @@ limitations under the License.
  * @see https://spec.matrix.org/v1.6/client-server-api/#storage
  */
 
-import { TypedEventEmitter } from "./models/typed-event-emitter.ts";
-import { ClientEvent, ClientEventHandlerMap } from "./client.ts";
-import { MatrixEvent } from "./models/event.ts";
-import { randomString } from "./randomstring.ts";
+import { type TypedEventEmitter } from "./models/typed-event-emitter.ts";
+import { type ClientEvent, type ClientEventHandlerMap } from "./client.ts";
+import { secureRandomString } from "./randomstring.ts";
 import { logger } from "./logger.ts";
 import encryptAESSecretStorageItem from "./utils/encryptAESSecretStorageItem.ts";
 import decryptAESSecretStorageItem from "./utils/decryptAESSecretStorageItem.ts";
-import { AESEncryptedSecretStoragePayload } from "./@types/AESEncryptedSecretStoragePayload.ts";
-import { AccountDataEvents, SecretStorageAccountDataEvents } from "./@types/event.ts";
+import { type AESEncryptedSecretStoragePayload } from "./@types/AESEncryptedSecretStoragePayload.ts";
+import { type AccountDataEvents, type SecretStorageAccountDataEvents } from "./@types/event.ts";
+import { type EmptyObject } from "./@types/common.ts";
 
 export const SECRET_STORAGE_ALGORITHM_V1_AES = "m.secret_storage.v1.aes-hmac-sha2";
 
@@ -108,7 +108,7 @@ export interface AddSecretStorageKeyOpts {
     /** Optional name of the key. */
     name?: string;
     /** The private key. Will be used to generate the key check values in the key info; it will not be stored on the server */
-    key: Uint8Array;
+    key: Uint8Array<ArrayBuffer>;
 }
 
 /**
@@ -148,7 +148,10 @@ export interface AccountDataClient extends TypedEventEmitter<ClientEvent.Account
      * @param content - the content object to be set
      * @returns an empty object
      */
-    setAccountData: <K extends keyof AccountDataEvents>(eventType: K, content: AccountDataEvents[K]) => Promise<{}>;
+    setAccountData: <K extends keyof AccountDataEvents>(
+        eventType: K,
+        content: AccountDataEvents[K] | Record<string, never>,
+    ) => Promise<EmptyObject>;
 }
 
 /**
@@ -198,7 +201,7 @@ export interface SecretStorageCallbacks {
             keys: Record<string, SecretStorageKeyDescription>;
         },
         name: string,
-    ) => Promise<[string, Uint8Array] | null>;
+    ) => Promise<[string, Uint8Array<ArrayBuffer>] | null>;
 }
 
 /**
@@ -276,14 +279,18 @@ export interface ServerSideSecretStorage {
      * Store an encrypted secret on the server.
      *
      * Details of the encryption keys to be used must previously have been stored in account data
-     * (for example, via {@link ServerSideSecretStorage#addKey}.
+     * (for example, via {@link ServerSideSecretStorageImpl#addKey}. {@link SecretStorageCallbacks#getSecretStorageKey} will be called to obtain a secret storage
+     * key to decrypt the secret.
+     *
+     * If the secret is `null`, the secret value in the account data will be set to an empty object.
+     * This is considered as "removing" the secret.
      *
      * @param name - The name of the secret - i.e., the "event type" to be stored in the account data
      * @param secret - The secret contents.
      * @param keys - The IDs of the keys to use to encrypt the secret, or null/undefined to use the default key
      *     (will throw if no default key is set).
      */
-    store(name: string, secret: string, keys?: string[] | null): Promise<void>;
+    store(name: string, secret: string | null, keys?: string[] | null): Promise<void>;
 
     /**
      * Get a secret from storage, and decrypt it.
@@ -316,9 +323,12 @@ export interface ServerSideSecretStorage {
     /**
      * Set the default key ID for encrypting secrets.
      *
+     * If keyId is `null`, the default key id value in the account data will be set to an empty object.
+     * This is considered as "disabling" the default key.
+     *
      * @param keyId - The new default key ID
      */
-    setDefaultKeyId(keyId: string): Promise<void>;
+    setDefaultKeyId(keyId: string | null): Promise<void>;
 }
 
 /**
@@ -357,25 +367,15 @@ export class ServerSideSecretStorageImpl implements ServerSideSecretStorage {
     }
 
     /**
-     * Set the default key ID for encrypting secrets.
-     *
-     * @param keyId - The new default key ID
+     * Implementation of {@link ServerSideSecretStorage#setDefaultKeyId}.
      */
-    public setDefaultKeyId(keyId: string): Promise<void> {
-        return new Promise<void>((resolve, reject) => {
-            const listener = (ev: MatrixEvent): void => {
-                if (ev.getType() === "m.secret_storage.default_key" && ev.getContent().key === keyId) {
-                    this.accountDataAdapter.removeListener(ClientEvent.AccountData, listener);
-                    resolve();
-                }
-            };
-            this.accountDataAdapter.on(ClientEvent.AccountData, listener);
-
-            this.accountDataAdapter.setAccountData("m.secret_storage.default_key", { key: keyId }).catch((e) => {
-                this.accountDataAdapter.removeListener(ClientEvent.AccountData, listener);
-                reject(e);
-            });
-        });
+    public async setDefaultKeyId(keyId: string | null): Promise<void> {
+        // The spec [1] says that the value of the account data entry should be an object with a `key` property.
+        // It doesn't specify how to delete the default key; we do it by setting the account data to an empty object.
+        //
+        // [1]: https://spec.matrix.org/v1.13/client-server-api/#key-storage
+        const newValue: Record<string, never> | { key: string } = keyId === null ? {} : { key: keyId };
+        await this.accountDataAdapter.setAccountData("m.secret_storage.default_key", newValue);
     }
 
     /**
@@ -417,7 +417,7 @@ export class ServerSideSecretStorageImpl implements ServerSideSecretStorage {
         // Create a unique key id. XXX: this is racey.
         if (!keyId) {
             do {
-                keyId = randomString(32);
+                keyId = secureRandomString(32);
             } while (await this.accountDataAdapter.getAccountDataFromServer(`m.secret_storage.key.${keyId}`));
         }
 
@@ -470,7 +470,7 @@ export class ServerSideSecretStorageImpl implements ServerSideSecretStorage {
      *
      * @returns whether or not the key matches
      */
-    public async checkKey(key: Uint8Array, info: SecretStorageKeyDescriptionAesV1): Promise<boolean> {
+    public async checkKey(key: Uint8Array<ArrayBuffer>, info: SecretStorageKeyDescriptionAesV1): Promise<boolean> {
         if (info.algorithm === SECRET_STORAGE_ALGORITHM_V1_AES) {
             if (info.mac) {
                 const { mac } = await calculateKeyCheck(key, info.iv);
@@ -485,17 +485,15 @@ export class ServerSideSecretStorageImpl implements ServerSideSecretStorage {
     }
 
     /**
-     * Store an encrypted secret on the server.
-     *
-     * Details of the encryption keys to be used must previously have been stored in account data
-     * (for example, via {@link ServerSideSecretStorageImpl#addKey}. {@link SecretStorageCallbacks#getSecretStorageKey} will be called to obtain a secret storage
-     * key to decrypt the secret.
-     *
-     * @param name - The name of the secret - i.e., the "event type" to be stored in the account data
-     * @param secret - The secret contents.
-     * @param keys - The IDs of the keys to use to encrypt the secret, or null/undefined to use the default key.
+     * Implementation of {@link ServerSideSecretStorage#store}.
      */
-    public async store(name: SecretStorageKey, secret: string, keys?: string[] | null): Promise<void> {
+    public async store(name: SecretStorageKey, secret: string | null, keys?: string[] | null): Promise<void> {
+        if (secret === null) {
+            // remove secret
+            await this.accountDataAdapter.setAccountData(name, {});
+            return;
+        }
+
         const encrypted: Record<string, AESEncryptedSecretStoragePayload> = {};
 
         if (!keys) {
@@ -685,6 +683,9 @@ const ZERO_STR = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0
  *     If omitted, a random initialization vector will be created.
  * @returns An object that contains, `mac` and `iv` properties.
  */
-export function calculateKeyCheck(key: Uint8Array, iv?: string): Promise<AESEncryptedSecretStoragePayload> {
+export function calculateKeyCheck(
+    key: Uint8Array<ArrayBuffer>,
+    iv?: string,
+): Promise<AESEncryptedSecretStoragePayload> {
     return encryptAESSecretStorageItem(ZERO_STR, key, "", iv);
 }

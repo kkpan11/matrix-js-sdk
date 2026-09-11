@@ -19,31 +19,40 @@ import { NotificationCountType, Room, RoomEvent } from "./models/room.ts";
 import { logger } from "./logger.ts";
 import { promiseMapSeries } from "./utils.ts";
 import { EventTimeline } from "./models/event-timeline.ts";
-import { ClientEvent, IStoredClientOpts, MatrixClient } from "./client.ts";
+import { ClientEvent, type IStoredClientOpts, type MatrixClient } from "./client.ts";
 import {
-    ISyncStateData,
+    type ISyncStateData,
     SyncState,
     _createAndReEmitRoom,
-    SyncApiOptions,
+    type SyncApiOptions,
     defaultClientOpts,
     defaultSyncApiOpts,
-    SetPresence,
+    type SetPresence,
+    processSyncCryptoChanges,
 } from "./sync.ts";
-import { MatrixEvent } from "./models/event.ts";
-import { Crypto } from "./crypto/index.ts";
-import { IMinimalEvent, IRoomEvent, IStateEvent, IStrippedState, ISyncResponse } from "./sync-accumulator.ts";
+import { type MatrixEvent } from "./models/event.ts";
+import {
+    type IMinimalEvent,
+    type IRoomEvent,
+    type IStateEvent,
+    type IStickyEvent,
+    type IStickyStateEvent,
+    type IStrippedState,
+    type ISyncResponse,
+    type IToDeviceEvent,
+} from "./sync-accumulator.ts";
 import { MatrixError } from "./http-api/index.ts";
 import {
-    Extension,
+    type Extension,
     ExtensionState,
-    MSC3575RoomData,
-    MSC3575SlidingSyncResponse,
-    SlidingSync,
+    type MSC3575RoomData,
+    type MSC3575SlidingSyncResponse,
+    type SlidingSync,
     SlidingSyncEvent,
     SlidingSyncState,
 } from "./sliding-sync.ts";
 import { EventType } from "./@types/event.ts";
-import { IPushRules } from "./@types/PushRules.ts";
+import { type IPushRules } from "./@types/PushRules.ts";
 import { RoomStateEvent } from "./models/room-state.ts";
 import { RoomMemberEvent } from "./models/room-member.ts";
 import { KnownMembership } from "./@types/membership.ts";
@@ -65,8 +74,63 @@ type ExtensionE2EEResponse = Pick<
     | "org.matrix.msc2732.device_unused_fallback_key_types"
 >;
 
+/**
+ * Collects the encryption-relevant parts of a sliding sync response, which arrive via two separate extensions
+ * (`e2ee` and `to_device`), so that they can be passed to the crypto layer in a single call once the whole response
+ * has been processed. See {@link SyncCryptoCallbacks.processSyncChanges} for why this matters.
+ */
+class E2EESyncChangesCollector {
+    private toDeviceEvents: IToDeviceEvent[] = [];
+    private e2ee?: ExtensionE2EEResponse;
+    private hasChanges = false;
+
+    public constructor(
+        private readonly client: MatrixClient,
+        private readonly cryptoCallbacks?: SyncCryptoCallbacks,
+    ) {}
+
+    public onToDeviceEvents(events: IToDeviceEvent[]): void {
+        this.toDeviceEvents = events;
+        this.hasChanges = true;
+    }
+
+    public onE2EEChanges(data: ExtensionE2EEResponse): void {
+        this.e2ee = data;
+        this.hasChanges = true;
+    }
+
+    /**
+     * Pass the collected changes to the crypto layer, and emit the resulting to-device messages on the client.
+     *
+     * A no-op if nothing has been collected since the last flush, so it is safe to call once per extension.
+     */
+    public async flush(): Promise<void> {
+        if (!this.hasChanges) return;
+        const toDeviceEvents = this.toDeviceEvents;
+        const e2ee = this.e2ee;
+        this.toDeviceEvents = [];
+        this.e2ee = undefined;
+        this.hasChanges = false;
+
+        // Fields omitted from the `e2ee` extension are unchanged since the last response; the crypto layer knows to
+        // interpret them that way given `useMsc4186`.
+        await processSyncCryptoChanges(this.client, this.cryptoCallbacks, {
+            toDeviceEvents,
+            deviceLists: e2ee?.device_lists,
+            oneTimeKeysCounts: e2ee?.device_one_time_keys_count,
+            unusedFallbackKeys:
+                e2ee?.device_unused_fallback_key_types ?? e2ee?.["org.matrix.msc2732.device_unused_fallback_key_types"],
+            useMsc4186: true,
+        });
+        this.cryptoCallbacks?.onSyncCompleted({});
+    }
+}
+
 class ExtensionE2EE implements Extension<ExtensionE2EERequest, ExtensionE2EEResponse> {
-    public constructor(private readonly crypto: Crypto) {}
+    public constructor(
+        private readonly crypto: SyncCryptoCallbacks,
+        private readonly collector: E2EESyncChangesCollector,
+    ) {}
 
     public name(): string {
         return "e2ee";
@@ -76,9 +140,16 @@ class ExtensionE2EE implements Extension<ExtensionE2EERequest, ExtensionE2EEResp
         return ExtensionState.PreProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionE2EERequest | undefined {
-        if (!isInitial) {
-            return undefined;
+    public async onRequest(isInitial: boolean): Promise<ExtensionE2EERequest> {
+        if (isInitial) {
+            // In SSS, the `?pos=` contains the stream position for device list updates.
+            // If we do not have a `?pos=` (e.g because we forgot it, or because the server
+            // invalidated our connection) then we MUST invlaidate all device lists because
+            // the server will not tell us the delta. This will then cause UTDs as we will fail
+            // to encrypt for new devices. This is an expensive call, so we should
+            // really really remember `?pos=` wherever possible.
+            logger.log("ExtensionE2EE: invalidating all device lists due to missing 'pos'");
+            await this.crypto.markAllTrackedUsersAsDirty();
         }
         return {
             enabled: true, // this is sticky so only send it on the initial request
@@ -86,18 +157,11 @@ class ExtensionE2EE implements Extension<ExtensionE2EERequest, ExtensionE2EEResp
     }
 
     public async onResponse(data: ExtensionE2EEResponse): Promise<void> {
-        // Handle device list updates
-        if (data.device_lists) {
-            await this.crypto.processDeviceLists(data.device_lists);
-        }
+        this.collector.onE2EEChanges(data);
+    }
 
-        // Handle one_time_keys_count and unused_fallback_key_types
-        await this.crypto.processKeyCounts(
-            data.device_one_time_keys_count,
-            data["device_unused_fallback_key_types"] || data["org.matrix.msc2732.device_unused_fallback_key_types"],
-        );
-
-        this.crypto.onSyncCompleted({});
+    public async onResponseComplete(): Promise<void> {
+        await this.collector.flush();
     }
 }
 
@@ -115,10 +179,7 @@ type ExtensionToDeviceResponse = {
 class ExtensionToDevice implements Extension<ExtensionToDeviceRequest, ExtensionToDeviceResponse> {
     private nextBatch: string | null = null;
 
-    public constructor(
-        private readonly client: MatrixClient,
-        private readonly cryptoCallbacks?: SyncCryptoCallbacks,
-    ) {}
+    public constructor(private readonly collector: E2EESyncChangesCollector) {}
 
     public name(): string {
         return "to_device";
@@ -128,65 +189,21 @@ class ExtensionToDevice implements Extension<ExtensionToDeviceRequest, Extension
         return ExtensionState.PreProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionToDeviceRequest {
-        const extReq: ExtensionToDeviceRequest = {
+    public async onRequest(isInitial: boolean): Promise<ExtensionToDeviceRequest> {
+        return {
             since: this.nextBatch !== null ? this.nextBatch : undefined,
+            limit: 100,
+            enabled: true,
         };
-        if (isInitial) {
-            extReq["limit"] = 100;
-            extReq["enabled"] = true;
-        }
-        return extReq;
     }
 
     public async onResponse(data: ExtensionToDeviceResponse): Promise<void> {
-        const cancelledKeyVerificationTxns: string[] = [];
-        let events = data["events"] || [];
-        if (events.length > 0 && this.cryptoCallbacks) {
-            events = await this.cryptoCallbacks.preprocessToDeviceMessages(events);
-        }
-        events
-            .map(this.client.getEventMapper())
-            .map((toDeviceEvent) => {
-                // map is a cheap inline forEach
-                // We want to flag m.key.verification.start events as cancelled
-                // if there's an accompanying m.key.verification.cancel event, so
-                // we pull out the transaction IDs from the cancellation events
-                // so we can flag the verification events as cancelled in the loop
-                // below.
-                if (toDeviceEvent.getType() === "m.key.verification.cancel") {
-                    const txnId: string | undefined = toDeviceEvent.getContent()["transaction_id"];
-                    if (txnId) {
-                        cancelledKeyVerificationTxns.push(txnId);
-                    }
-                }
-
-                // as mentioned above, .map is a cheap inline forEach, so return
-                // the unmodified event.
-                return toDeviceEvent;
-            })
-            .forEach((toDeviceEvent) => {
-                const content = toDeviceEvent.getContent();
-                if (toDeviceEvent.getType() == "m.room.message" && content.msgtype == "m.bad.encrypted") {
-                    // the mapper already logged a warning.
-                    logger.log("Ignoring undecryptable to-device event from " + toDeviceEvent.getSender());
-                    return;
-                }
-
-                if (
-                    toDeviceEvent.getType() === "m.key.verification.start" ||
-                    toDeviceEvent.getType() === "m.key.verification.request"
-                ) {
-                    const txnId = content["transaction_id"];
-                    if (cancelledKeyVerificationTxns.includes(txnId)) {
-                        toDeviceEvent.flagCancelled();
-                    }
-                }
-
-                this.client.emit(ClientEvent.ToDeviceEvent, toDeviceEvent);
-            });
-
+        this.collector.onToDeviceEvents(data["events"] || []);
         this.nextBatch = data.next_batch;
+    }
+
+    public async onResponseComplete(): Promise<void> {
+        await this.collector.flush();
     }
 }
 
@@ -210,10 +227,7 @@ class ExtensionAccountData implements Extension<ExtensionAccountDataRequest, Ext
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionAccountDataRequest | undefined {
-        if (!isInitial) {
-            return undefined;
-        }
+    public async onRequest(isInitial: boolean): Promise<ExtensionAccountDataRequest> {
         return {
             enabled: true,
         };
@@ -224,6 +238,7 @@ class ExtensionAccountData implements Extension<ExtensionAccountDataRequest, Ext
             this.processGlobalAccountData(data.global);
         }
 
+        // oxlint-disable-next-line guard-for-in
         for (const roomId in data.rooms) {
             const accountDataEvents = mapEvents(this.client, roomId, data.rooms[roomId]);
             const room = this.client.getRoom(roomId);
@@ -280,10 +295,7 @@ class ExtensionTyping implements Extension<ExtensionTypingRequest, ExtensionTypi
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionTypingRequest | undefined {
-        if (!isInitial) {
-            return undefined; // don't send a JSON object for subsequent requests, we don't need to.
-        }
+    public async onRequest(isInitial: boolean): Promise<ExtensionTypingRequest> {
         return {
             enabled: true,
         };
@@ -294,6 +306,7 @@ class ExtensionTyping implements Extension<ExtensionTypingRequest, ExtensionTypi
             return;
         }
 
+        // oxlint-disable-next-line guard-for-in
         for (const roomId in data.rooms) {
             processEphemeralEvents(this.client, roomId, [data.rooms[roomId]]);
         }
@@ -319,13 +332,10 @@ class ExtensionReceipts implements Extension<ExtensionReceiptsRequest, Extension
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionReceiptsRequest | undefined {
-        if (isInitial) {
-            return {
-                enabled: true,
-            };
-        }
-        return undefined; // don't send a JSON object for subsequent requests, we don't need to.
+    public async onRequest(isInitial: boolean): Promise<ExtensionReceiptsRequest> {
+        return {
+            enabled: true,
+        };
     }
 
     public async onResponse(data: ExtensionReceiptsResponse): Promise<void> {
@@ -333,8 +343,76 @@ class ExtensionReceipts implements Extension<ExtensionReceiptsRequest, Extension
             return;
         }
 
+        // oxlint-disable-next-line guard-for-in
         for (const roomId in data.rooms) {
             processEphemeralEvents(this.client, roomId, [data.rooms[roomId]]);
+        }
+    }
+}
+
+type ExtensionStickyEventsRequest = {
+    enabled: boolean;
+    /** Max events per response; the server may return fewer. */
+    limit?: number;
+    /** The `next_batch` of the previous response. */
+    since?: string;
+};
+
+type ExtensionStickyEventsResponse = {
+    /** Only sent when there were changes. */
+    next_batch?: string;
+    rooms?: Record<string, { events: Array<IStickyEvent | IStickyStateEvent> }>;
+};
+
+/**
+ * Delivers sticky events (MSC4354) over sliding sync.
+ * https://github.com/matrix-org/matrix-spec-proposals/pull/4480
+ *
+ * Sticky events expire after a duration instead of living in the timeline forever, and the server
+ * re-sends the unexpired ones (e.g. on join) so late joiners still see them.
+ *
+ * The server sends them for every room matched by a list or subscription, even rooms currently
+ * outside the list window. Sticky events already in a room's timeline are excluded here, so
+ * `processRoomData` picks those up separately.
+ */
+class ExtensionStickyEvents implements Extension<ExtensionStickyEventsRequest, ExtensionStickyEventsResponse> {
+    private nextBatch?: string;
+
+    public constructor(private readonly client: MatrixClient) {}
+
+    public name(): string {
+        // Keeps MSC4354's number, as the extension was originally specified there.
+        return "org.matrix.msc4354.sticky_events";
+    }
+
+    public when(): ExtensionState {
+        // Sticky events are stored on a Room, so the room has to exist first.
+        return ExtensionState.PostProcess;
+    }
+
+    public async onRequest(isInitial: boolean): Promise<ExtensionStickyEventsRequest> {
+        return {
+            enabled: true,
+            limit: 100,
+            // Undefined until the first response, which asks for all unexpired sticky events.
+            since: this.nextBatch,
+        };
+    }
+
+    public async onResponse(data: ExtensionStickyEventsResponse): Promise<void> {
+        for (const [roomId, roomData] of Object.entries(data?.rooms ?? {})) {
+            const room = this.client.getRoom(roomId);
+            if (!room) {
+                // Dropping is safe: unexpired sticky events are re-sent once we know the room.
+                logger.debug(`Ignoring sticky events for unknown room ${roomId}`);
+                continue;
+            }
+            room._unstable_addStickyEvents(mapEvents(this.client, roomId, roomData.events ?? []));
+        }
+
+        // next_batch is only returned when there were changes, and must be echoed back as `since`.
+        if (data?.next_batch) {
+            this.nextBatch = data.next_batch;
         }
     }
 }
@@ -355,8 +433,8 @@ export class SlidingSyncSdk {
     public constructor(
         private readonly slidingSync: SlidingSync,
         private readonly client: MatrixClient,
-        opts?: IStoredClientOpts,
-        syncOpts?: SyncApiOptions,
+        opts: IStoredClientOpts | undefined,
+        syncOpts: SyncApiOptions,
     ) {
         this.opts = defaultClientOpts(opts);
         this.syncOpts = defaultSyncApiOpts(syncOpts);
@@ -367,14 +445,18 @@ export class SlidingSyncSdk {
 
         this.slidingSync.on(SlidingSyncEvent.Lifecycle, this.onLifecycle.bind(this));
         this.slidingSync.on(SlidingSyncEvent.RoomData, this.onRoomData.bind(this));
+        // The `e2ee` and `to_device` extensions feed a shared collector, so that the crypto layer sees all the
+        // encryption-relevant data from a response in a single call.
+        const e2eeCollector = new E2EESyncChangesCollector(this.client, this.syncOpts.cryptoCallbacks);
         const extensions: Extension<any, any>[] = [
-            new ExtensionToDevice(this.client, this.syncOpts.cryptoCallbacks),
+            new ExtensionToDevice(e2eeCollector),
             new ExtensionAccountData(this.client),
             new ExtensionTyping(this.client),
             new ExtensionReceipts(this.client),
+            new ExtensionStickyEvents(this.client),
         ];
-        if (this.syncOpts.crypto) {
-            extensions.push(new ExtensionE2EE(this.syncOpts.crypto));
+        if (this.syncOpts.cryptoCallbacks) {
+            extensions.push(new ExtensionE2EE(this.syncOpts.cryptoCallbacks, e2eeCollector));
         }
         extensions.forEach((ext) => {
             this.slidingSync.registerExtension(ext);
@@ -385,17 +467,21 @@ export class SlidingSyncSdk {
         let room = this.client.store.getRoom(roomId);
         if (!room) {
             if (!roomData.initial) {
-                logger.debug("initial flag not set but no stored room exists for room ", roomId, roomData);
+                this.syncOpts.logger.debug(
+                    "initial flag not set but no stored room exists for room ",
+                    roomId,
+                    roomData,
+                );
                 return;
             }
             room = _createAndReEmitRoom(this.client, roomId, this.opts);
         }
-        await this.processRoomData(this.client, room!, roomData);
+        await this.processRoomData(this.client, room, roomData);
     }
 
     private onLifecycle(state: SlidingSyncState, resp: MSC3575SlidingSyncResponse | null, err?: Error): void {
         if (err) {
-            logger.debug("onLifecycle", state, err);
+            this.syncOpts.logger.debug("onLifecycle", state, err);
         }
         switch (state) {
             case SlidingSyncState.Complete:
@@ -436,6 +522,9 @@ export class SlidingSyncSdk {
                     }
                 } else {
                     this.failCount = 0;
+                    this.syncOpts.logger.debug(
+                        `SlidingSyncState.RequestFinished with ${Object.keys(resp?.rooms || []).length} rooms`,
+                    );
                 }
                 break;
         }
@@ -554,7 +643,7 @@ export class SlidingSyncSdk {
     private shouldAbortSync(error: MatrixError): boolean {
         if (error.errcode === "M_UNKNOWN_TOKEN") {
             // The logout already happened, we just need to stop.
-            logger.warn("Token no longer valid - assuming logout");
+            this.syncOpts.logger.warn("Token no longer valid - assuming logout");
             this.stop();
             this.updateSyncState(SyncState.Error, { error });
             return true;
@@ -574,7 +663,7 @@ export class SlidingSyncSdk {
 
         // TODO: handle threaded / beacon events
 
-        if (roomData.initial) {
+        if (roomData.limited || roomData.initial) {
             // we should not know about any of these timeline entries if this is a genuinely new room.
             // If we do, then we've effectively done scrollback (e.g requesting timeline_limit: 1 for
             // this room, then timeline_limit: 50).
@@ -631,6 +720,9 @@ export class SlidingSyncSdk {
                 room.setUnreadNotificationCount(NotificationCountType.Highlight, roomData.highlight_count);
             }
         }
+        if (roomData.bump_stamp) {
+            room.setBumpStamp(roomData.bump_stamp);
+        }
 
         if (Number.isInteger(roomData.invited_count)) {
             room.currentState.setInvitedMemberCount(roomData.invited_count!);
@@ -650,11 +742,10 @@ export class SlidingSyncSdk {
             inviteStateEvents.forEach((e) => {
                 this.client.emit(ClientEvent.Event, e);
             });
-            room.updateMyMembership(KnownMembership.Invite);
             return;
         }
 
-        if (roomData.initial) {
+        if (roomData.limited) {
             // set the back-pagination token. Do this *before* adding any
             // events so that clients can start back-paginating.
             room.getLiveTimeline().setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
@@ -680,7 +771,7 @@ export class SlidingSyncSdk {
             for (let i = timelineEvents.length - 1; i >= 0; i--) {
                 const eventId = timelineEvents[i].getId();
                 if (room.getTimelineForEvent(eventId)) {
-                    logger.debug("Already have event " + eventId + " in limited " +
+                    this.syncOpts.logger.debug("Already have event " + eventId + " in limited " +
                         "sync - not resetting");
                     limited = false;
 
@@ -721,6 +812,12 @@ export class SlidingSyncSdk {
         // local fields must be set before any async calls because call site assumes
         // synchronous execution prior to emitting SlidingSyncState.Complete
         room.updateMyMembership(KnownMembership.Join);
+
+        room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
+
+        // The MSC4480 extension excludes sticky events already present in the timeline, so we have
+        // to pick those up here. See ExtensionStickyEvents for the rest.
+        room._unstable_addStickyEvents(timelineEvents.filter((e) => e.unstableStickyInfo !== undefined));
 
         room.recalculate();
         if (roomData.initial) {
@@ -887,19 +984,19 @@ export class SlidingSyncSdk {
      * Main entry point. Blocks until stop() is called.
      */
     public async sync(): Promise<void> {
-        logger.debug("Sliding sync init loop");
+        this.syncOpts.logger.debug("Sliding sync init loop");
 
         //   1) We need to get push rules so we can check if events should bing as we get
         //      them from /sync.
         while (!this.client.isGuest()) {
             try {
-                logger.debug("Getting push rules...");
+                this.syncOpts.logger.debug("Getting push rules...");
                 const result = await this.client.getPushRules();
-                logger.debug("Got push rules");
+                this.syncOpts.logger.debug("Got push rules");
                 this.client.pushRules = result;
                 break;
             } catch (err) {
-                logger.error("Getting push rules failed", err);
+                this.syncOpts.logger.error("Getting push rules failed", err);
                 if (this.shouldAbortSync(<MatrixError>err)) {
                     return;
                 }
@@ -914,7 +1011,7 @@ export class SlidingSyncSdk {
      * Stops the sync object from syncing.
      */
     public stop(): void {
-        logger.debug("SyncApi.stop");
+        this.syncOpts.logger.debug("SyncApi.stop");
         this.slidingSync.stop();
     }
 

@@ -18,15 +18,22 @@ import { RoomMember } from "./room-member.ts";
 import { logger } from "../logger.ts";
 import { isNumber, removeHiddenChars } from "../utils.ts";
 import { EventType, UNSTABLE_MSC2716_MARKER } from "../@types/event.ts";
-import { IEvent, MatrixEvent, MatrixEventEvent } from "./event.ts";
-import { MatrixClient } from "../client.ts";
+import { type IEvent, type MatrixEvent, MatrixEventEvent } from "./event.ts";
+import { type MatrixClient } from "../client.ts";
 import { GuestAccess, HistoryVisibility, JoinRule } from "../@types/partials.ts";
 import { TypedEventEmitter } from "./typed-event-emitter.ts";
-import { Beacon, BeaconEvent, BeaconEventHandlerMap, getBeaconInfoIdentifier, BeaconIdentifier } from "./beacon.ts";
+import {
+    Beacon,
+    BeaconEvent,
+    type BeaconEventHandlerMap,
+    getBeaconInfoIdentifier,
+    type BeaconIdentifier,
+} from "./beacon.ts";
 import { TypedReEmitter } from "../ReEmitter.ts";
 import { M_BEACON, M_BEACON_INFO } from "../@types/beacon.ts";
 import { KnownMembership } from "../@types/membership.ts";
-import { RoomJoinRulesEventContent } from "../@types/state_events.ts";
+import { type RoomJoinRulesEventContent } from "../@types/state_events.ts";
+import { shouldUseHydraForRoomVersion } from "../utils/roomVersion.ts";
 
 export interface IMarkerFoundOptions {
     /** Whether the timeline was empty before the marker event arrived in the
@@ -55,11 +62,8 @@ export interface IPowerLevelsContent {
     users?: Record<string, number>;
     events?: Record<string, number>;
     notifications?: Partial<Record<"room", number>>;
-    // eslint-disable-next-line camelcase
     users_default?: number;
-    // eslint-disable-next-line camelcase
     events_default?: number;
-    // eslint-disable-next-line camelcase
     state_default?: number;
     ban?: number;
     invite?: number;
@@ -167,6 +171,9 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
     public readonly beacons = new Map<BeaconIdentifier, Beacon>();
     private _liveBeaconIds: BeaconIdentifier[] = [];
 
+    // We only wants to print warnings about bad room state once.
+    private getVersionWarning = false;
+
     /**
      * Construct room state.
      *
@@ -201,6 +208,22 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
     ) {
         super();
         this.updateModifiedTime();
+    }
+
+    /**
+     * Gets the version of the room
+     * @returns The version of the room
+     */
+    public getRoomVersion(): string {
+        const createEvent = this.getStateEvents(EventType.RoomCreate, "");
+        if (!createEvent) {
+            if (!this.getVersionWarning) {
+                logger.warn("[getVersion] Room " + this.roomId + " does not have an m.room.create event");
+                this.getVersionWarning = true;
+            }
+            return "1";
+        }
+        return createEvent.getContent()["room_version"] ?? "1";
     }
 
     /**
@@ -412,6 +435,11 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
         this.updateModifiedTime();
 
         // update the core event dict
+        // Track display names that change so we can recalculate disambiguation
+        const affectedDisplayNames = new Set<string>();
+        // Track userIds whose membership events we process so we don't emit duplicate events
+        const processedMemberUserIds = new Set<string>();
+
         stateEvents.forEach((event) => {
             if (event.getRoomId() !== this.roomId || !event.isState()) return;
 
@@ -422,7 +450,22 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
             const lastStateEvent = this.getStateEventMatching(event);
             this.setStateEvent(event);
             if (event.getType() === EventType.RoomMember) {
-                this.updateDisplayNameCache(event.getStateKey()!, event.getContent().displayname ?? "");
+                const userId = event.getStateKey()!;
+                processedMemberUserIds.add(userId);
+                const newDisplayName = event.getContent().displayname ?? "";
+                const oldDisplayName = this.userIdsToDisplayNames[userId];
+
+                // Track both old and new display names for disambiguation recalculation
+                if (oldDisplayName) {
+                    const strippedOld = removeHiddenChars(oldDisplayName);
+                    if (strippedOld) affectedDisplayNames.add(strippedOld);
+                }
+                if (newDisplayName) {
+                    const strippedNew = removeHiddenChars(newDisplayName);
+                    if (strippedNew) affectedDisplayNames.add(strippedNew);
+                }
+
+                this.updateDisplayNameCache(userId, newDisplayName);
                 this.updateThirdPartyTokenCache(event);
             }
             this.emit(RoomStateEvent.Events, event, this, lastStateEvent);
@@ -462,12 +505,20 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
                     return;
                 }
                 const members = Object.values(this.members);
+
+                const createEvent = this.getStateEvents(EventType.RoomCreate, "");
+                const creators = getCreators(this.getRoomVersion(), createEvent);
+
                 members.forEach((member) => {
                     // We only propagate `RoomState.members` event if the
                     // power levels has been changed
                     // large room suffer from large re-rendering especially when not needed
                     const oldLastModified = member.getLastModifiedTime();
-                    member.setPowerLevelEvent(event);
+
+                    if (createEvent) {
+                        const pl = powerLevelForUserId(member.userId, event, creators);
+                        member.setPowerLevel(pl, event);
+                    }
                     if (oldLastModified !== member.getLastModifiedTime()) {
                         this.emit(RoomStateEvent.Members, event, this, member);
                     }
@@ -479,6 +530,33 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
                 this.emit(RoomStateEvent.Marker, event, markerFoundOptions);
             }
         });
+
+        // Recalculate disambiguation for all members whose display names were affected.
+        // This ensures that when a user changes their name to match (or stop matching)
+        // another user, all affected users' disambiguation flags are updated correctly.
+        if (affectedDisplayNames.size > 0) {
+            // Collect all affected user IDs first to avoid duplicate processing
+            const affectedUserIds = new Set<string>();
+            for (const displayName of affectedDisplayNames) {
+                const userIds = this.displayNameToUserIds.get(displayName) ?? [];
+                userIds.forEach((id) => affectedUserIds.add(id));
+            }
+
+            // Process each affected member once, excluding those whose membership
+            // events were already processed (they already got their events emitted)
+            for (const userId of affectedUserIds) {
+                if (processedMemberUserIds.has(userId)) {
+                    continue;
+                }
+                const member = this.members[userId];
+                if (member?.events.member) {
+                    const nameChanged = member.recalculateDisambiguatedName(this);
+                    if (nameChanged) {
+                        this.emit(RoomStateEvent.Members, member.events.member, this, member);
+                    }
+                }
+            }
+        }
 
         this.emit(RoomStateEvent.Update, this);
     }
@@ -619,9 +697,16 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
 
     private updateMember(member: RoomMember): void {
         // this member may have a power level already, so set it.
+        const createEvent = this.getStateEvents(EventType.RoomCreate, "");
         const pwrLvlEvent = this.getStateEvents(EventType.RoomPowerLevels, "");
-        if (pwrLvlEvent) {
-            member.setPowerLevelEvent(pwrLvlEvent);
+        if (pwrLvlEvent && createEvent) {
+            const powerLevel = powerLevelForUserId(
+                member.userId,
+                pwrLvlEvent,
+                getCreators(this.getRoomVersion(), createEvent),
+            );
+
+            member.setPowerLevel(powerLevel, pwrLvlEvent);
         }
 
         // blow away the sentinel which is now outdated
@@ -898,7 +983,6 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
 
         let stateDefault = 0;
         let eventsDefault = 0;
-        let powerLevel = 0;
         if (powerLevelsEvent) {
             powerLevels = powerLevelsEvent.getContent();
             eventsLevels = powerLevels.events || {};
@@ -907,13 +991,6 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
                 stateDefault = powerLevels.state_default!;
             } else {
                 stateDefault = 50;
-            }
-
-            const userPowerLevel = powerLevels.users && powerLevels.users[userId];
-            if (Number.isSafeInteger(userPowerLevel)) {
-                powerLevel = userPowerLevel!;
-            } else if (Number.isSafeInteger(powerLevels.users_default)) {
-                powerLevel = powerLevels.users_default!;
             }
 
             if (Number.isSafeInteger(powerLevels.events_default)) {
@@ -925,7 +1002,11 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
         if (Number.isSafeInteger(eventsLevels[eventType])) {
             requiredLevel = eventsLevels[eventType];
         }
-        return powerLevel >= requiredLevel;
+
+        const roomMember = this.getMember(userId);
+        const userPowerLevel = roomMember?.powerLevel ?? 0;
+
+        return userPowerLevel >= requiredLevel;
     }
 
     /**
@@ -1073,6 +1154,7 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
 
     private updateDisplayNameCache(userId: string, displayName: string): void {
         const oldName = this.userIdsToDisplayNames[userId];
+
         delete this.userIdsToDisplayNames[userId];
         if (oldName) {
             // Remove the old name from the cache.
@@ -1097,6 +1179,49 @@ export class RoomState extends TypedEventEmitter<EmittedEvents, EventHandlerMap>
             const arr = this.displayNameToUserIds.get(strippedDisplayname) ?? [];
             arr.push(userId);
             this.displayNameToUserIds.set(strippedDisplayname, arr);
+        }
+    }
+}
+
+/**
+ * Get the set of creator user IDs for a room: empty if the room is not a 'hydra' room, otherwise
+ * computed from the sender of the m.room.create event plus the additional_creators field.
+ * @param roomVersion The version of the room
+ * @param roomCreateEvent The m.room.create event for the room
+ * @returns A set of user IDs of the creators of the room.
+ */
+function getCreators(roomVersion: string, roomCreateEvent: MatrixEvent | null): Set<string> {
+    const creators = new Set<string>();
+    if (shouldUseHydraForRoomVersion(roomVersion) && roomCreateEvent) {
+        const roomCreateSender = roomCreateEvent.getSender();
+        if (roomCreateSender) creators.add(roomCreateSender);
+        const additionalCreators = roomCreateEvent.getDirectionalContent().additional_creators;
+        if (Array.isArray(additionalCreators)) additionalCreators.forEach((c) => creators.add(c));
+    }
+    return creators;
+}
+
+/**
+ *
+ * @param userId The user ID to compute the power level for
+ * @param powerLevelEvents The power level event for the room
+ * @param creators The set of creator user IDs for the room if the room is a 'hydra' room, otherwise the empty set.
+ */
+function powerLevelForUserId(userId: string, powerLevelEvent: MatrixEvent, creators: Set<string>): number {
+    if (creators.has(userId)) {
+        // As of "Hydra", If the user is a creator, they always have the highest power level
+        return Infinity;
+    } else {
+        const evContent = powerLevelEvent.getDirectionalContent();
+
+        const users: { [userId: string]: number } = evContent.users || {};
+
+        if (users[userId] !== undefined && Number.isInteger(users[userId])) {
+            return users[userId];
+        } else if (evContent.users_default !== undefined) {
+            return evContent.users_default;
+        } else {
+            return 0;
         }
     }
 }

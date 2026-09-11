@@ -20,7 +20,7 @@ import {
     LocationAssetType,
     M_LOCATION,
     M_TIMESTAMP,
-    LocationEventWireContent,
+    type LocationEventWireContent,
 } from "../../src/@types/location";
 import { M_TEXT } from "../../src/@types/extensible_events";
 import { MsgType } from "../../src/@types/event";
@@ -38,14 +38,12 @@ describe("Location", function () {
 
     const backwardsCompatibleEventContent = { ...defaultContent };
 
-    // eslint-disable-next-line camelcase
     const { body, msgtype, geo_uri, ...modernProperties } = defaultContent;
     const modernEventContent = { ...modernProperties };
 
     const legacyEventContent = {
         body,
         msgtype,
-        // eslint-disable-next-line camelcase
         geo_uri,
     } as LocationEventWireContent;
 
@@ -93,11 +91,7 @@ describe("Location", function () {
     it("parses legacy event correctly", () => {
         const eventContent = parseLocationEvent(legacyEventContent);
 
-        const {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            [M_TIMESTAMP.name]: timestamp,
-            ...expectedResult
-        } = defaultContent;
+        const { [M_TIMESTAMP.name]: timestamp, ...expectedResult } = defaultContent;
         expect(eventContent).toEqual({
             ...expectedResult,
             [M_LOCATION.name]: {
